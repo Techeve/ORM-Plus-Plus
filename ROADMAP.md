@@ -19,6 +19,16 @@ Stand: 2026-07-07. Basiert auf dem Hand-off-Brief plus Interview-Entscheidungen.
 | Tooling | v1 nur Library-API (auch Migration-Finalisierung ist Go-API); CLI später |
 | Repo | gitlab.techeve.de, Gruppe `orm-plus-plus`, Projekt `orm-plus-plus`; zunächst intern, später Open Source (Lizenz noch offen, permissiv angedacht) |
 
+### API-Verfeinerungen (Interview-Runde 2)
+
+| Thema | Entscheidung |
+|---|---|
+| Scope im Context | Tenant **und** Geo hängen am `context.Context` (`orm.WithTenant`, `orm.WithGeo`), nicht an Funktionssignaturen. Fehlender Tenant ⇒ Fehler (fail-closed). |
+| Event-Format | Events folgen dem **CloudEvents-1.0-Standard**. Engine füllt den Envelope (`id`, `source`, `type`, `subject`, `time`, `datacontenttype`), Entwickler liefert nur `data`. Tenant/Geo/globale Sequenz als Extension-Attribute; Schema-Version im `type`-Suffix (`….v1`). Envelope-Attribute als echte Spalten der Event-Tabelle, `data` als JSONB — Export nach außen ist reines Umformatieren. |
+| Aggregat-Basis | ES-Modelle betten `orm.Aggregate` ein. `Load`/`AtVersion`/`AtTime`/`History`/`Append`/`Refresh` sowie Versions-/Snapshot-Zugriff existieren dadurch **von Haus aus** (snapshot-transparent). Einzige Pflicht des Entwicklers: `Apply(orm.Event) error`. |
+| Event-Trigger | Jedes `Append` löst automatisch über die Outbox aus: (1) eingebaute Projektion, (2) registrierbare Read-View-Generatoren (`orm.OnEvent`, persistent, at-least-once, checkpointed, rebuildfähig), (3) Live-Streams (`orm.Watch`) für Echtzeit-UIs (flüchtig; Verlässlichkeit kommt aus (2)). |
+| CRUD-API | Typisiertes Repository `orm.Repo[T]` mit Insert/Get/Update/Upsert/Delete, Query-Builder, `db.Tx` über mehrere Modelle — wie im API-Entwurf vom 2026-07-07 abgenommen. |
+
 ## 2. Architektur-Schichten
 
 ```
@@ -95,7 +105,65 @@ Das Herzstück und der schwierigste Teil — bewusst nach Phase 1/2, weil sie au
 ### Stufe 2 (nach v1.0, nur notiert)
 - YB-Geo-Partitionierung mit mehreren Geolokalitäts-Ebenen, Row-Level Security nativ (PG/YB) + SQLite-Emulation, CLI-Tool, Admin-HTTP-Endpoint, Point-in-time-Reads als First-Class-API.
 
-## 4. Größte Risiken
+## 4. Migrations-Design (Entwurf)
+
+### Versionsregistrierung
+
+Die App deklariert eine ganzzahlige, monoton steigende **Schema-Version** plus die Migrationsschritte, die zu ihr führen. ORM++ vergleicht beim Start die deklarierte mit der in der DB gespeicherten Version und führt fehlende Migrationen selbst aus:
+
+```go
+orm.Register[DNSZone](db, orm.EventSourced())
+orm.Register[ProviderAccount](db, orm.CRUD())
+
+orm.SchemaVersion(db, 3) // Version, die diese App-Version erwartet
+
+// Schritte von v2 nach v3 (alle Migrationen bleiben im Code erhalten,
+// damit auch v1→v3 in einem Zug möglich ist):
+orm.MigrationTo(db, 3,
+    // Komplexer Umbau: neues Model ersetzt altes, mit Transformation.
+    orm.ReplaceModel[ZoneV2, DNSZone](func(ctx context.Context, old ZoneV2) (DNSZone, error) {
+        return DNSZone{...}, nil
+    }),
+    // Freies Batch-Migrationsskript, checkpointed & drosselbar:
+    orm.BatchScript("normalize-records", func(ctx context.Context, b orm.Batch) error {
+        // b liefert Zeilen häppchenweise; ORM++ merkt sich den Fortschritt.
+        return nil
+    }),
+)
+
+err := db.Migrate(ctx) // erkennt Versionsdifferenz und orchestriert
+```
+
+- **Additive Änderungen** (neue Spalte, neuer Index, neues Model) brauchen keinen Migrationsschritt — sie kommen aus dem Auto-Diff.
+- **Entfallende Felder** werden nur als deprecated markiert; physisches Entfernen erst bei der Finalisierung.
+- **Drift-Schutz:** Zusätzlich zur Version speichert ORM++ einen Checksum-Hash der deklarierten Modelle. Ändern sich Modelle ohne Versions-Erhöhung ⇒ Startfehler statt stiller Schema-Änderung.
+
+### Zustandsmaschine (Online-Migration, Expand/Contract)
+
+```
+idle → expanding → backfill → dual-write → finalizing → idle
+```
+
+1. **expanding:** Lease-Inhaber legt neue Tabellen/Spalten an (nur additiv). Alte Instanzen laufen unbeeinträchtigt weiter.
+2. **backfill:** Batch-Worker kopiert/transformiert Bestandsdaten alt→neu; wiederaufnehmbar (Checkpoint pro Schritt), drosselbar.
+3. **dual-write:** Neue Instanzen schreiben in alte **und** neue Tabelle; alte Instanzen nur in die alte (deren Schreibvorgänge werden per Trigger-Fallback/Nachlauf-Backfill nachgezogen). Beide App-Generationen sehen konsistente Daten.
+4. **finalizing:** Explizit per `db.FinalizeMigration(ctx, 3)`. Vorbedingung (von ORM++ geprüft): **keine lebende Instanz mit älterer Schema-Version** im Instanzregister. Dann: Dual-Write beenden, deprecated-Felder und alte Tabellen entfernen.
+
+### Systemtabellen (Teil von ORM++, Präfix `ormpp_`)
+
+| Tabelle | Zweck | Wichtigste Spalten |
+|---|---|---|
+| `ormpp_schema_state` | Globaler Migrationszustand (1 Zeile) | `current_version`, `target_version`, `phase`, `models_checksum`, `updated_at` |
+| `ormpp_schema_history` | Audit aller Versionswechsel | `version`, `phase_from/to`, `applied_at`, `applied_by_instance` |
+| `ormpp_instances` | **Instanzregister** — welche App-Instanz läuft mit welcher Version | `instance_id`, `hostname`, `app_version`, `schema_version`, `started_at`, `last_heartbeat` |
+| `ormpp_migration_progress` | Checkpoints der Batch-Schritte | `version`, `step`, `last_key`, `rows_done`, `state` |
+| `ormpp_deprecated` | Markierte, noch nicht entfernte Felder/Tabellen | `model`, `column`, `deprecated_in_version` |
+| `ormpp_leases` | Koordination (Migrations-Leader, Projektions-Worker) | `name`, `holder_instance`, `fencing_token`, `expires_at` |
+| `ormpp_outbox` / `ormpp_checkpoints` | Event-Trigger-Kette und Projektions-Stände | — |
+
+Das Instanzregister ist der Schlüssel für Dual-Write: Jede Instanz trägt sich bei `Open()` mit ihrer Schema-Version ein und heartbeatet; Instanzen ohne Heartbeat > TTL gelten als beendet. `FinalizeMigration` verweigert, solange eine lebende Instanz eine ältere Version meldet.
+
+## 5. Größte Risiken
 
 1. **Dual-Write-Migration** ist die anspruchsvollste Komponente (Konfliktfälle: Schreiben in alt während Backfill läuft; Reihenfolge-Garantien). Früh ein präzises Zustandsmodell (State machine) definieren und als ADR festhalten, bevor Code entsteht.
 2. **SQLite-Nebenläufigkeit**: eine Schreib-Connection, WAL-Modus Pflicht; Outbox/Worker-Design darf nicht stillschweigend Postgres-Semantik (SKIP LOCKED) voraussetzen.
