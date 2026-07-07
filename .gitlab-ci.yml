@@ -39,12 +39,16 @@ test:
     - if: $CI_COMMIT_BRANCH
     - if: $CI_COMMIT_TAG
 
+# golangci-lint wird per `go install` mit derselben Go-Version gebaut wie das
+# Projekt (fertige Images hinken der Toolchain hinter); der Modul-Cache macht
+# das nach dem ersten Lauf günstig.
 lint:
   stage: test
-  image: golangci/golangci-lint:v2.1
+  image: golang:1.26
   <<: *go-cache
   script:
-    - golangci-lint run --timeout 5m ./...
+    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+    - $GOPATH/bin/golangci-lint run --timeout 5m ./...
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH
