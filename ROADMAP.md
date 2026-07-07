@@ -187,6 +187,10 @@ Pro ES-Model drei Tabellen (Beispiel `zones`) plus zwei geteilte Systemtabellen:
 | `ormpp_event_types` | Typ-Wörterbuch: `type_id SMALLINT` ↔ voller CloudEvents-Typ-String; Mapping im Speicher der Registry. |
 | `ormpp_checkpoints` | Cursor aller Konsumenten: `(consumer, geo, seq)` — Cursor-Vektor, einer je Geo. |
 
+**Snapshot-Erzeugung:** Ein Snapshot ist der **serialisierte Aggregat-Zustand nach Event N** — keine separate Berechnungsfunktion. Der Worker faltet: letzter Snapshot (oder leeres Struct) + Events seither durch `Apply` → Struct serialisieren (JSON, zstd) → speichern. Die Verdichtungslogik *ist* `Apply`; eine zweite Snapshot-Funktion pro Model wäre eine Divergenzquelle (Snapshot-Laden vs. Event-Rebuild müssen identisch sein). Opt-in-Ausnahme: implementiert ein Model `SnapshotMarshal/SnapshotUnmarshal`, übernimmt es die Serialisierung selbst (abgeleitete Caches ausklammern, Spezialformate, Feld-Verschlüsselung); sonst automatische Struct-Serialisierung.
+
+**Snapshot-Intervalle:** deklariert **pro Model** bei der Registrierung, mit globalem Default bei `Open`: `orm.DefaultSnapshotEvery(n)` global; `orm.SnapshotEvery(n)`, `orm.SnapshotMaxAge(d)` (ODER-Bedingung) und `orm.SnapshotDisabled()` je Model. Gezählt wird **pro Aggregat** (`aggregate_seq` seit letztem Snapshot), nicht pro Tabelle. Erstellung asynchron durch lease-koordinierte Worker je Region — nie im Schreibpfad, `Append` wird dadurch nie langsamer.
+
 **Effizienz-Entscheidungen (Nicht-Duplikation):**
 1. **Kein CloudEvents-Envelope in der Zeile** — `specversion`/`source`/`datacontenttype`/`time` sind konstant oder ableitbar; der Envelope wird beim Lesen/Export aus den Spalten rekonstruiert. CloudEvents ist Austauschformat, nicht Speicherformat.
 2. **Typ-String nur im Wörterbuch** — `type_id SMALLINT` (2 Bytes) statt ~36 Bytes Typ-String pro Event.
