@@ -54,6 +54,7 @@ Stand: 2026-07-07. Basiert auf dem Hand-off-Brief plus Interview-Entscheidungen.
 Grundregeln:
 - **Oberstes Prinzip — Verhaltensgleichheit (perfekter Abstraktions-Layer):** Für die App ist irrelevant, welche Datenbank darunter liegt. Jede Deklaration wird auf jedem Backend akzeptiert und semantisch erfüllt — nativ, wo die DB es kann; emuliert oder kollabiert, wo nicht. Beispiel: eine Topologie mit fünf Regionen auf SQLite ist gültig; SQLite hat implizit die eine Region `local`, alle deklarierten Regionen mappen darauf. Gleiches gilt für Single-Region-Postgres. Die API antwortet überall identisch; App-Code darf **nie** nach dem Backend verzweigen — dieselbe Anwendung läuft byte-identisch auf SQLite (Demo/Desktop), Postgres (On-Prem) und Yugabyte (Cloud). Einzige Ausnahme: Observability-APIs (`MigrationStatus` u. Ä.) zeigen dem *Betreiber* die physische Wahrheit (z. B. eine Region `local`), niemals eine vorgetäuschte Topologie.
 - Jede systemseitige Tabelle (Events, Snapshots, Projektionen, Outbox, Leases, Schema-Versionen, Migrationszustand) trägt von Anfang an `tenant_id UUID` und die Geo-Spalte(n).
+- **Tenant-Integrität:** Tenants leben im eingebauten Register `ormpp_tenants` (GeoGlobal, Verwaltung über `db.Tenants()`; `orm.SingleTenant` wird beim Bootstrap angelegt). Jeder Insert/Append verifiziert die Tenant-ID gegen das Register (Engine-Cache + FK wo nativ; unbekannt/archiviert ⇒ `ErrUnknownTenant`). `tenant_id` ist write-once (nie in einem UPDATE, keine Umzugs-API). Jede Operation — auch Get/Update/Delete per ID — filtert auf den Context-Tenant; fremder Tenant per ID verhält sich wie `ErrNotFound`.
 - Koordination (Migrations-Leader, Projektions-Leases) läuft über **Lease-Tabellen mit Fencing**, nicht über Postgres-Advisory-Locks — die sind auf YugabyteDB nicht verlässlich verfügbar und auf SQLite ohnehin nicht.
 - Kein Feature landet im Core, das nicht auf allen drei Dialekten (nativ oder emuliert) darstellbar ist — und die Test-Suite prüft jedes Feature **verhaltensgleich** auf allen dreien.
 
@@ -171,6 +172,7 @@ In geo-partitionierten Clustern (Yugabyte: EU-Daten liegen nur auf EU-Knoten usw
 | `ormpp_migration_progress` | Checkpoints der Backfill-Shards, pro Region | `version`, `step`, `geo`, `shard_from`, `shard_to`, `worker_instance`, `last_key`, `rows_done`, `state` |
 | `ormpp_deprecated` | Markierte, noch nicht entfernte Felder/Tabellen | `model`, `column`, `deprecated_in_version` |
 | `ormpp_leases` | Koordination (Migrations-Leader, Projektions-Worker) | `name`, `holder_instance`, `fencing_token`, `expires_at` |
+| `ormpp_tenants` | Eingebautes Tenant-Register (GeoGlobal); Insert-Verifikation, write-once-Regel | `tenant_id`, `name`, `status` (active/archived), `created_at` |
 | `ormpp_outbox` / `ormpp_checkpoints` | Event-Trigger-Kette und Projektions-Stände | — |
 
 Das Instanzregister ist der Schlüssel für Dual-Write: Jede Instanz trägt sich bei `Open()` mit ihrer Schema-Version ein und heartbeatet; Instanzen ohne Heartbeat > TTL gelten als beendet. `FinalizeMigration` verweigert, solange eine lebende Instanz eine ältere Version meldet.

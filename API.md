@@ -153,6 +153,28 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
+### 4.1 Tenant-Registry (eingebaut)
+
+Tenants kommen nicht aus der App — ORM++ bringt sie als System-Model mit (`ormpp_tenants`, beim Bootstrap angelegt, `GeoGlobal`, damit jede Region lokal validieren kann):
+
+```go
+tenants := db.Tenants()
+
+t, err := tenants.Create(ctx, orm.TenantInfo{Name: "ACME GmbH"})   // ID: UUIDv7
+t, err  = tenants.Get(ctx, id)
+list, err := tenants.List(ctx)
+err     = tenants.Archive(ctx, id)   // kein Hard-Delete: blockiert neue Schreib-
+                                     // vorgänge, Bestandsdaten bleiben lesbar
+```
+
+`orm.SingleTenant` ist ein beim Bootstrap automatisch angelegter Tenant für Single-Tenant-Apps.
+
+**Tenant-Regeln (nicht abschaltbar):**
+
+1. **Insert-Verifikation:** Jeder `Insert`/`Append` prüft die Context-Tenant-ID gegen das Register — unbekannt oder archiviert ⇒ `orm.ErrUnknownTenant`. Durchsetzung engine-seitig (In-Memory-Cache des Registers, Invalidierung über die Event-Kette) plus FK-Constraint, wo die DB das nativ kann; das Verhalten ist auf allen Backends identisch.
+2. **Write-once:** `tenant_id` wird beim Insert gesetzt und ist danach unveränderlich. Die Engine nimmt das Feld in kein `UPDATE` auf; es existiert keine API, einen Datensatz einem anderen Tenant zuzuordnen (Mandanten-Fusion wäre eine explizite, auditierte Verwaltungsoperation, Stufe 2).
+3. **Scope in jeder Operation — auch per ID:** Alle Queries, Updates und Deletes filtern automatisch auf den Context-Tenant; auch `Get`/`Update`/`Delete` per Primärschlüssel. Ein per ID angesprochener Datensatz eines fremden Tenants verhält sich exakt wie nicht existent (`ErrNotFound`). Nicht-ID-Filter ohne Tenant sind konstruktionsbedingt unmöglich (fail-closed Context).
+
 ---
 
 ## 5. Modelle deklarieren
@@ -639,6 +661,7 @@ Alle Fehler sind mit `errors.Is` prüfbare Sentinel-Werte:
 |---|---|
 | `orm.ErrNotFound` | Datensatz/Aggregat existiert nicht (im Tenant-/Geo-Scope) |
 | `orm.ErrNoTenant` | Context ohne Tenant (fail-closed) |
+| `orm.ErrUnknownTenant` | Tenant-ID existiert nicht im Register oder ist archiviert |
 | `orm.ErrNoGeo` | Mehr-Regionen-Topologie, aber kein Daten-Geo im Context |
 | `orm.ErrRegionNotActive` | Daten-Geo zeigt auf `bootstrapping`/`draining`/unbekannte Region |
 | `orm.ErrVersionConflict` | Optimistisches Locking: CRUD-`version` oder Aggregat-Version veraltet |
@@ -676,7 +699,7 @@ func main() {
     if err := db.Migrate(ctx); err != nil { panic(err) }
     db.StartWorkers(ctx)
 
-    ctx = orm.WithTenant(ctx, orm.SingleTenant) // Konstante für Single-Tenant-Apps
+    ctx = orm.WithTenant(ctx, orm.SingleTenant) // beim Bootstrap angelegter Default-Tenant
 
     todos := orm.Repo[Todo](db)
     t := &Todo{Title: "ORM++ bauen"}
