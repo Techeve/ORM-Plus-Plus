@@ -165,6 +165,16 @@ t, err  = tenants.Get(ctx, id)
 list, err := tenants.List(ctx)
 err     = tenants.Archive(ctx, id)   // kein Hard-Delete: blockiert neue Schreib-
                                      // vorgänge, Bestandsdaten bleiben lesbar
+
+// DSGVO: vollständiger Datenauszug eines Tenants (JSON Lines, alle Modelle
+// inkl. Events, Snapshots und Archiv):
+err = tenants.Export(ctx, id, w)
+
+// Recht auf Vergessenwerden: physisches Löschen ALLER Daten des Tenants über
+// alle Tabellen, Events, Snapshots und Archive hinweg. Nur die Engine kennt
+// alle Orte. Zweistufig: Tenant muss archiviert sein (sonst
+// ErrTenantNotArchived); Vorgang wird in ormpp_schema_history auditiert.
+err = tenants.Purge(ctx, id)
 ```
 
 `orm.SingleTenant` ist ein beim Bootstrap automatisch angelegter Tenant für Single-Tenant-Apps.
@@ -195,6 +205,17 @@ Registrierung passiert beim Start, vor `Migrate`. Die Registry validiert das Str
 | Option | Bedeutung |
 |---|---|
 | `orm.TenantFree()` | Model ohne Tenant-Spalte und ohne Tenant-Filter — für **technische Tabellen ohne Nutzerdaten** (Konfiguration, Lookup-Werte, Job-Zustände). Operationen funktionieren auch mit Context ohne Tenant. Tenant-gebundene Modelle bleiben der Default; die Option ist die dokumentierte Ausnahme. |
+
+**Zusammengesetzte Indizes & Constraints** (Model-Optionen; Feldnamen sind Go-Feldnamen):
+
+```go
+orm.Register[Record](db, orm.CRUD(),
+    orm.Unique("ProjectID", "Name"),       // Unique-Constraint über mehrere Spalten
+    orm.Index("Status", "CreatedAt"),      // zusammengesetzter Sekundärindex
+)
+```
+
+Tenant- und Geo-Spalten werden automatisch in Unique-Constraints einbezogen (Eindeutigkeit gilt pro Tenant). Hinweis für YugabyteDB: Sekundärindizes sind dort verteilte Indizes mit entsprechenden Schreibkosten — die Registry übernimmt die Deklaration unverändert, das Verhalten ist identisch; die Kostenabwägung dokumentiert das Betriebs-Kapitel.
 
 **Geo-Modi** (Model-Option, Default `GeoScoped`):
 
@@ -236,6 +257,9 @@ type ProviderAccount struct {
 | `version` | Spalte für optimistisches Locking bei `Update` |
 | `autocreate`, `autoupdate` | Zeitstempel-Pflege durch die Engine |
 | `ref=Model[,ondelete=…]` | Referenz auf ein anderes Model (Abschnitt 5.4) |
+| `enum=a\|b\|c` | Wertemenge für String-Felder: CHECK-Constraint wo nativ, engine-seitig geprüft überall — ungültiger Wert ⇒ `orm.ErrInvalidValue` |
+| `default=…` | Default-Wert, wenn das Feld beim Insert den Zero-Value hat (nicht kombinierbar mit `required`) |
+| `encrypted` | Feld wird verschlüsselt gespeichert (Abschnitt 5.5) |
 | `immutable` | Write-once: wird beim Insert gesetzt, danach unveränderlich — die Engine nimmt das Feld in kein `UPDATE` auf (gleiches Verhalten wie `tenant_id`) |
 | `required` | Muss beim Insert explizit gesetzt sein: Zero-Value ⇒ `orm.ErrRequiredField` |
 | `deprecated` | Feld ist zur Entfernung markiert (Expand/Contract, Abschnitt 8) |
@@ -295,6 +319,28 @@ type Document struct {
 
 Kein Eager-Loading in v1 — Referenzen sind Integritätswerkzeug; geladen wird explizit (`orm.Repo[User](db).Get(ctx, doc.CreatedBy)`). Komfort-Loading (Joins/Preload) ist Stufe 2.
 
+### 5.5 Feld-Verschlüsselung
+
+Felder mit dem Tag `encrypted` werden von der Engine vor dem Schreiben verschlüsselt (AES-256-GCM) und beim Lesen transparent entschlüsselt — auf allen Backends identisch, die DB sieht nur Ciphertext (`BYTEA`/`BLOB`).
+
+```go
+type ProviderAccount struct {
+    ID     orm.ID `orm:"pk"`
+    Name   string `orm:"index"`
+    APIKey string `orm:"encrypted,required"`
+}
+
+db, err := orm.Open(orm.Postgres(dsn),
+    orm.Encryption(orm.StaticKey(keyFromKMS)),   // Pflicht, sobald ein Model `encrypted` nutzt
+)
+```
+
+**Regeln:**
+
+- `orm.Encryption(provider)` ist eine `Open`-Option; ohne sie schlägt die Registrierung eines Models mit `encrypted`-Feldern fehl. `orm.StaticKey([]byte)` ist der einfachste Provider; das `orm.KeyProvider`-Interface (aktueller Schlüssel + Lookup per Key-ID) ist von Tag 1 rotationsfähig — jeder Ciphertext trägt die ID des benutzten Schlüssels, Rotation erfolgt lazy beim nächsten Schreiben.
+- Verschlüsselte Felder sind **nicht indizierbar und nicht filterbar** (`Where` auf ein `encrypted`-Feld ⇒ Registrierungs-/Query-Fehler) — die DB kann Ciphertext nicht sinnvoll vergleichen.
+- Das Tag wirkt auch in Event-Payloads und Snapshots von ES-Modellen: markierte Felder liegen dort ebenfalls nur verschlüsselt.
+
 ---
 
 ## 6. CRUD-Modelle
@@ -308,7 +354,9 @@ func Repo[T any](h Handle) Repository[T]     // Handle: *DB oder Tx
 ```go
 type Repository[T any] interface {
     Insert(ctx context.Context, entity *T) error          // füllt pk/autocreate
+    InsertMany(ctx context.Context, entities []*T, opts ...BatchOption) error
     Get(ctx context.Context, id orm.ID) (*T, error)       // ErrNotFound
+    GetForUpdate(ctx context.Context, id orm.ID) (*T, error)  // nur in Tx (sonst ErrRequiresTx)
     Update(ctx context.Context, entity *T) error          // ErrVersionConflict bei `version`-Tag
     Upsert(ctx context.Context, entity *T) error
     Delete(ctx context.Context, id orm.ID) error
@@ -355,9 +403,12 @@ type QueryBuilder[T any] interface {
     Limit(n int) QueryBuilder[T]
     Offset(n int) QueryBuilder[T]
     All() ([]*T, error)
+    Iter() iter.Seq2[*T, error]                        // Streaming: Cursor statt Speicher
     First() (*T, error)                                 // ErrNotFound
     Count() (int64, error)
     Exists() (bool, error)
+    UpdateSet(sets ...Set) (int64, error)              // mengenbasiertes Update (orm.Set(field, v))
+    Delete() (int64, error)                            // mengenbasiertes Löschen
 }
 ```
 
@@ -388,7 +439,42 @@ list, err := accounts.Query(ctx).
 
 Der Tenant-Filter (und Geo-Scope) wird **immer** automatisch injiziert — er ist nicht abschaltbar und taucht in keiner Query auf.
 
-### 6.3 Transaktionen
+### 6.3 Batch & Bulk
+
+```go
+// Atomar (Default): alle oder keiner — eine Transaktion.
+err := accounts.InsertMany(ctx, accs)
+
+// Große Volumina: in Chunks, jeder Chunk eine eigene Transaktion.
+// Rückgabefehler nennt die Zahl der bereits eingefügten Zeilen.
+err = accounts.InsertMany(ctx, million, orm.Chunked(10_000))
+
+// Mengenbasiert ändern/löschen — ein Statement, kein N×Roundtrip:
+n, err := accounts.Query(ctx).
+    Where(orm.Eq("Status", "trial")).
+    UpdateSet(orm.Set("Status", "expired"))
+
+n, err = accounts.Query(ctx).Where(orm.Lt("CreatedAt", cutoff)).Delete()
+```
+
+**Die Einfüge-Strategie wählt der Dialekt-Adapter, nicht der Aufrufer** (Grundprinzip): Postgres nutzt Multi-Row-`INSERT ... VALUES` und schaltet ab einer Schwelle auf `COPY`; Yugabyte batcht passend zur Tablet-Verteilung; SQLite fährt Prepared Statements in einer Transaktion. Tenant-, Referenz-, `enum`- und `required`-Prüfungen gelten in jedem Pfad — auch unter `COPY` (engine-seitige Validierung vor dem Schreiben). Mengenbasierte `UpdateSet`/`Delete` respektieren selbstverständlich Tenant-/Geo-Scope und lösen `ondelete`-Regeln aus.
+
+### 6.4 Pessimistisches Sperren
+
+Für Read-Modify-Write-Muster, bei denen optimistisches Locking (Retry) nicht passt:
+
+```go
+err := db.Tx(ctx, func(tx orm.Tx) error {
+    acc, err := orm.Repo[Account](tx).GetForUpdate(ctx, id)   // Zeile gesperrt
+    if err != nil { return err }
+    acc.Balance -= amount
+    return orm.Repo[Account](tx).Update(ctx, acc)
+})
+```
+
+`SELECT ... FOR UPDATE` auf Postgres/Yugabyte; SQLite emuliert über die serialisierte Schreib-Connection — verhaltensgleich. Außerhalb einer Transaktion ⇒ `orm.ErrRequiresTx`.
+
+### 6.5 Transaktionen
 
 ```go
 func (db *DB) Tx(ctx context.Context, fn func(tx orm.Tx) error) error
@@ -700,6 +786,9 @@ Alle Fehler sind mit `errors.Is` prüfbare Sentinel-Werte:
 | `orm.ErrRequiredField` | `required`-Feld beim Insert nicht gesetzt (Zero-Value) |
 | `orm.ErrInvalidReference` | `ref`-Ziel existiert nicht oder gehört zu einem anderen Tenant |
 | `orm.ErrReferenceInUse` | Löschen verweigert: Datensatz wird noch referenziert (`ondelete=restrict`) |
+| `orm.ErrInvalidValue` | Wert außerhalb der `enum`-Wertemenge |
+| `orm.ErrRequiresTx` | Operation (z. B. `GetForUpdate`) außerhalb einer Transaktion |
+| `orm.ErrTenantNotArchived` | `Purge` auf einen nicht archivierten Tenant |
 | `orm.ErrNoGeo` | Mehr-Regionen-Topologie, aber kein Daten-Geo im Context |
 | `orm.ErrRegionNotActive` | Daten-Geo zeigt auf `bootstrapping`/`draining`/unbekannte Region |
 | `orm.ErrVersionConflict` | Optimistisches Locking: CRUD-`version` oder Aggregat-Version veraltet |

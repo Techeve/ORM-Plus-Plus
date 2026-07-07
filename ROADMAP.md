@@ -30,7 +30,12 @@ Stand: 2026-07-07. Basiert auf dem Hand-off-Brief plus Interview-Entscheidungen.
 | CRUD-API | Typisiertes Repository `orm.Repo[T]` mit Insert/Get/Update/Upsert/Delete, Query-Builder, `db.Tx` über mehrere Modelle — wie im API-Entwurf vom 2026-07-07 abgenommen. |
 | Tenant-freie Modelle | `orm.TenantFree()` als Model-Option für technische Tabellen ohne Nutzerdaten: keine Tenant-Spalte, kein Tenant-Filter, nutzbar ohne Tenant im Context. Default bleibt tenant-gebunden. |
 | Referenzen | `ref=Model[,ondelete=restrict\|cascade\|setnull]`-Tag; Durchsetzung wie beim Tenant (Engine-Prüfung überall + FK wo nativ). Referenzen nur innerhalb desselben Tenants (Ausnahme: Ziel ist TenantFree/GeoGlobal); TenantFree → tenant-gebunden ist verboten (Registrierungsfehler). Ziele dürfen ES-Modelle sein (Prüfung gegen Read-Model). Kein Eager-Loading in v1. |
-| Feld-Constraints | `immutable` (write-once wie `tenant_id`, nie im UPDATE), `required` (Zero-Value beim Insert ⇒ `ErrRequiredField`). NULL-Fähigkeit aus dem Go-Typ: Pointer = nullable, sonst NOT NULL. |
+| Feld-Constraints | `immutable` (write-once wie `tenant_id`, nie im UPDATE), `required` (Zero-Value beim Insert ⇒ `ErrRequiredField`), `enum=a\|b\|c` (CHECK nativ + Engine-Prüfung), `default=…`. NULL-Fähigkeit aus dem Go-Typ: Pointer = nullable, sonst NOT NULL. |
+| Composite-Constraints | `orm.Unique(felder...)` / `orm.Index(felder...)` als Model-Optionen; Tenant/Geo automatisch in Unique-Constraints einbezogen (Eindeutigkeit pro Tenant). |
+| Batch & Bulk | `InsertMany` (Default atomar; `orm.Chunked(n)` für Volumen), mengenbasiertes `UpdateSet`/`Delete` am Query-Builder. Einfüge-Strategie wählt der Dialekt-Adapter: PG Multi-Row-INSERT → COPY ab Schwelle, YB tablet-gerechtes Batching, SQLite Prepared Statements in einer Tx. Alle Integritätsprüfungen gelten in jedem Pfad. |
+| Streaming & Sperren | `Iter()` (Cursor-Streaming statt `All()`), `GetForUpdate` in Transaktionen (`FOR UPDATE` auf PG/YB, SQLite über serialisierte Schreib-Connection). |
+| Feld-Verschlüsselung | `encrypted`-Tag (AES-256-GCM, `orm.Encryption(KeyProvider)` bei Open, rotationsfähig via Key-ID im Ciphertext); nicht indizier-/filterbar; wirkt auch in Event-Payloads und Snapshots. |
+| Tenant-Purge/Export | `db.Tenants().Export(ctx, id, w)` (DSGVO-Datenauszug) und `Purge(ctx, id)` (physisches Löschen über alle Tabellen/Events/Snapshots/Archive; nur auf archivierte Tenants, auditiert). |
 
 ## 2. Architektur-Schichten
 
@@ -109,6 +114,14 @@ Das Herzstück und der schwierigste Teil — bewusst nach Phase 1/2, weil sie au
 
 ### Stufe 2 (nach v1.0, nur notiert)
 - YB-Geo-Partitionierung mit mehreren Geolokalitäts-Ebenen, Row-Level Security nativ (PG/YB) + SQLite-Emulation, CLI-Tool, Admin-HTTP-Endpoint, Point-in-time-Reads als First-Class-API.
+- Cursor-Pagination (Keyset, `After(cursor)` mit opakem Token).
+- Volltextsuche (`fulltext`-Tag; SQLite FTS5 / PG tsvector / YB).
+- TTL/Ablaufdaten (`expires`-Feld + Sweeper-Worker; Sessions, Tokens).
+- Fortlaufende Nummernkreise pro Tenant (Rechnungsnummern; Block-Allokation für verteilte Cluster).
+- Follower-/Replika-Reads als Opt-in (`orm.StaleOK(ctx, maxAge)`).
+- Soft-Delete als Model-Option, berechnete Spalten, Aggregations-Queries (`GroupBy`/`Sum`/`Avg`).
+- Eager-Loading/Joins für Referenzen; Untertabellen statt JSON-Spalten für verschachtelte Slices.
+- Mandanten-Fusion / Tenant-Umzug als auditierte Verwaltungsoperation.
 
 ## 4. Migrations-Design (Entwurf)
 
