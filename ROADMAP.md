@@ -189,7 +189,7 @@ Pro ES-Model drei Tabellen (Beispiel `zones`) plus zwei geteilte Systemtabellen:
 
 **Snapshot-Erzeugung:** Ein Snapshot ist der **serialisierte Aggregat-Zustand nach Event N** — keine separate Berechnungsfunktion. Der Worker faltet: letzter Snapshot (oder leeres Struct) + Events seither durch `Apply` → Struct serialisieren (JSON, zstd) → speichern. Die Verdichtungslogik *ist* `Apply`; eine zweite Snapshot-Funktion pro Model wäre eine Divergenzquelle (Snapshot-Laden vs. Event-Rebuild müssen identisch sein). Opt-in-Ausnahme: implementiert ein Model `SnapshotMarshal/SnapshotUnmarshal`, übernimmt es die Serialisierung selbst (abgeleitete Caches ausklammern, Spezialformate, Feld-Verschlüsselung); sonst automatische Struct-Serialisierung.
 
-**Snapshot-Intervalle:** deklariert **pro Model** bei der Registrierung, mit globalem Default bei `Open`: `orm.DefaultSnapshotEvery(n)` global; `orm.SnapshotEvery(n)`, `orm.SnapshotMaxAge(d)` (ODER-Bedingung) und `orm.SnapshotDisabled()` je Model. Gezählt wird **pro Aggregat** (`aggregate_seq` seit letztem Snapshot), nicht pro Tabelle. Erstellung asynchron durch lease-koordinierte Worker je Region — nie im Schreibpfad, `Append` wird dadurch nie langsamer.
+**Snapshot-Intervalle & -Aufbewahrung:** deklariert **pro Model** bei der Registrierung, mit globalem Default bei `Open`: `orm.DefaultSnapshotEvery(n)` global; `orm.SnapshotEvery(n)`, `orm.SnapshotMaxAge(d)` (ODER-Bedingung), `orm.SnapshotKeepLast(n)` (Aufbewahrung, Default 2) und `orm.SnapshotDisabled()` je Model. Gezählt wird **pro Aggregat** (`aggregate_seq` seit letztem Snapshot), nicht pro Tabelle. Erstellung asynchron durch lease-koordinierte Worker je Region — nie im Schreibpfad, `Append` wird dadurch nie langsamer.
 
 **Effizienz-Entscheidungen (Nicht-Duplikation):**
 1. **Kein CloudEvents-Envelope in der Zeile** — `specversion`/`source`/`datacontenttype`/`time` sind konstant oder ableitbar; der Envelope wird beim Lesen/Export aus den Spalten rekonstruiert. CloudEvents ist Austauschformat, nicht Speicherformat.
@@ -199,7 +199,7 @@ Pro ES-Model drei Tabellen (Beispiel `zones`) plus zwei geteilte Systemtabellen:
 
 Fixkosten ≈ 100–120 Bytes/Event + Payload.
 
-**Sequenzen & Yugabyte:** `seq` ist je Geo monoton, nicht global — eine globale Sequenz wäre auf verteilten Clustern ein Hotspot. Garantien: strikte Ordnung pro Aggregat (`aggregate_seq`) und pro Region (`seq`); keine (unnötige) Totalordnung über Regionen.
+**Sequenzen & Yugabyte (entschieden):** `seq` ist je Geo monoton, nicht global — eine globale Sequenz wäre auf verteilten Clustern ein Hotspot. Garantien: strikte Ordnung pro Aggregat (`aggregate_seq`) und pro Region (`seq`); keine Totalordnung über Regionen.
 
 **Archivierung:** Events älter als der vorletzte Snapshot wandern in Archiv-Partitionen — PG/YB: Seq-Range-Partition abhängen (kein zeilenweises Kopieren); SQLite: Nebentabellen, batchweise. `History()`/`GetAt()` lesen transparent heiß + Archiv. Optional `orm.ArchiveCompression(zstd)` pro Zeile; Default unkomprimiert (Archiv bleibt SQL-abfragbar).
 
