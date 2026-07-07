@@ -2,6 +2,10 @@ stages:
   - test
   - release
 
+default:
+  tags:
+    - docker
+
 variables:
   GOPATH: $CI_PROJECT_DIR/.go
   GOCACHE: $CI_PROJECT_DIR/.go-cache
