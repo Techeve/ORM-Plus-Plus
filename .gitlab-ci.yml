@@ -1,0 +1,90 @@
+stages:
+  - test
+  - release
+
+variables:
+  GOPATH: $CI_PROJECT_DIR/.go
+  GOCACHE: $CI_PROJECT_DIR/.go-cache
+
+.go-cache: &go-cache
+  cache:
+    key: go-$CI_COMMIT_REF_SLUG
+    paths:
+      - .go/pkg/mod/
+      - .go-cache/
+    fallback_keys:
+      - go-develop
+
+# Format-Check, Vet und Tests mit Race-Detector und Coverage.
+test:
+  stage: test
+  image: golang:1.26
+  <<: *go-cache
+  script:
+    - test -z "$(gofmt -l .)" || { echo "Nicht gofmt-konform:"; gofmt -l .; exit 1; }
+    - go vet ./...
+    - go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+    - go tool cover -func=coverage.txt | tail -n 1
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  artifacts:
+    paths:
+      - coverage.txt
+    expire_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+lint:
+  stage: test
+  image: golangci/golangci-lint:v2.1
+  <<: *go-cache
+  script:
+    - golangci-lint run --timeout 5m ./...
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# Prüft auf Branches/MRs, dass der Changelog aus den Conventional Commits
+# generierbar ist (schlägt bei kaputter cliff.toml fehl).
+changelog-check:
+  stage: test
+  image:
+    name: orhunp/git-cliff:latest
+    entrypoint: [""]
+  script:
+    - git-cliff --unreleased --strip all || true
+    - git-cliff --context > /dev/null
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# Bei einem Versions-Tag (v*) wird der Changelog aus den Commits generiert
+# und ein GitLab-Release mit den Release-Notes des Tags erstellt.
+changelog:
+  stage: release
+  image:
+    name: orhunp/git-cliff:latest
+    entrypoint: [""]
+  script:
+    - git-cliff --latest --strip header -o release-notes.md
+    - git-cliff -o CHANGELOG.md
+  artifacts:
+    paths:
+      - CHANGELOG.md
+      - release-notes.md
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs: ["changelog", "test", "lint"]
+  script:
+    - echo "Erstelle Release $CI_COMMIT_TAG"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: "ORM++ $CI_COMMIT_TAG"
+    description: release-notes.md
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
