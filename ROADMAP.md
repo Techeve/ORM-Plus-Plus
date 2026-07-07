@@ -149,14 +149,25 @@ idle → expanding → backfill → dual-write → finalizing → idle
 3. **dual-write:** Neue Instanzen schreiben in alte **und** neue Tabelle; alte Instanzen nur in die alte (deren Schreibvorgänge werden per Trigger-Fallback/Nachlauf-Backfill nachgezogen). Beide App-Generationen sehen konsistente Daten.
 4. **finalizing:** Explizit per `db.FinalizeMigration(ctx, 3)`. Vorbedingung (von ORM++ geprüft): **keine lebende Instanz mit älterer Schema-Version** im Instanzregister. Dann: Dual-Write beenden, deprecated-Felder und alte Tabellen entfernen.
 
+### Geo-verteilte Migration
+
+In geo-partitionierten Clustern (Yugabyte: EU-Daten liegen nur auf EU-Knoten usw.) darf der Backfill nicht von einem einzelnen Worker quer über Regionen laufen. Deshalb:
+
+- **Instanzen deklarieren Standort und Rolle:** `orm.InstanceGeo(...)` und `orm.MigrationRole(none|Worker)` bei `Open()`; beides steht im Instanzregister. Damit ist von außen steuerbar, welche Server (z. B. dedizierte Migrations-Instanzen je Region) mitarbeiten.
+- **Arbeitseinheit = Shard `(Schritt, Geo, Schlüsselbereich)`:** Die Engine zerlegt jede Region in Schlüsselbereiche und vergibt sie als Leases. Worker erhalten nur Shards **ihrer eigenen Region** — Datentransfer bleibt regional/tablet-lokal, die Migration startet weltweit gleichzeitig, und jede Region skaliert unabhängig (`WorkersPerGeo`, `BatchSize`, `Throttle` im `orm.MigrationPlan`).
+- **Ausfallsicherheit:** Lease läuft ab ⇒ ein anderer Worker derselben Region übernimmt den Shard am Checkpoint.
+- **Phasen:** `expanding` bleibt global (DDL einmal, ein Leader). `backfill` ist geo-parallel. `finalizing` verlangt Abschluss **aller** Regionen; früher fertige Regionen warten im Dual-Write.
+- **Beobachtbarkeit:** `db.MigrationStatus(ctx)` liefert Fortschritt, Worker-Zahl und Phase **pro Region**.
+- SQLite/Single-Region-Postgres: degeneriert automatisch zu einer Region mit einem Worker — gleiche Mechanik, kein Sonderpfad.
+
 ### Systemtabellen (Teil von ORM++, Präfix `ormpp_`)
 
 | Tabelle | Zweck | Wichtigste Spalten |
 |---|---|---|
 | `ormpp_schema_state` | Globaler Migrationszustand (1 Zeile) | `current_version`, `target_version`, `phase`, `models_checksum`, `updated_at` |
 | `ormpp_schema_history` | Audit aller Versionswechsel | `version`, `phase_from/to`, `applied_at`, `applied_by_instance` |
-| `ormpp_instances` | **Instanzregister** — welche App-Instanz läuft mit welcher Version | `instance_id`, `hostname`, `app_version`, `schema_version`, `started_at`, `last_heartbeat` |
-| `ormpp_migration_progress` | Checkpoints der Batch-Schritte | `version`, `step`, `last_key`, `rows_done`, `state` |
+| `ormpp_instances` | **Instanzregister** — welche App-Instanz läuft wo mit welcher Version/Rolle | `instance_id`, `hostname`, `geo`, `migration_role`, `app_version`, `schema_version`, `started_at`, `last_heartbeat` |
+| `ormpp_migration_progress` | Checkpoints der Backfill-Shards, pro Region | `version`, `step`, `geo`, `shard_from`, `shard_to`, `worker_instance`, `last_key`, `rows_done`, `state` |
 | `ormpp_deprecated` | Markierte, noch nicht entfernte Felder/Tabellen | `model`, `column`, `deprecated_in_version` |
 | `ormpp_leases` | Koordination (Migrations-Leader, Projektions-Worker) | `name`, `holder_instance`, `fencing_token`, `expires_at` |
 | `ormpp_outbox` / `ormpp_checkpoints` | Event-Trigger-Kette und Projektions-Stände | — |
