@@ -175,7 +175,31 @@ In geo-partitionierten Clustern (Yugabyte: EU-Daten liegen nur auf EU-Knoten usw
 
 Das Instanzregister ist der Schlüssel für Dual-Write: Jede Instanz trägt sich bei `Open()` mit ihrer Schema-Version ein und heartbeatet; Instanzen ohne Heartbeat > TTL gelten als beendet. `FinalizeMigration` verweigert, solange eine lebende Instanz eine ältere Version meldet.
 
-## 5. Topologie & Instanziierung (Entwurf)
+## 5. Physisches Schema für Event-Sourcing-Modelle (Entwurf)
+
+Pro ES-Model drei Tabellen (Beispiel `zones`) plus zwei geteilte Systemtabellen:
+
+| Tabelle | Inhalt |
+|---|---|
+| `zones` | Read-Model: 1 Zeile pro Aggregat, Spalten aus dem Struct + `aggregate_seq` (Projektionsstand). Query-Builder läuft hiergegen — Lesen kostet wie bei CRUD. |
+| `zones_events` | Append-only-Log, `PARTITION BY LIST (geo)`. Spalten: `geo`, `tenant_id`, `aggregate_id`, `aggregate_seq`, `seq` (je Geo monoton), `event_id` (UUIDv7), `occurred_at`, `type_id SMALLINT`, `data JSONB`. PK `(aggregate_id, aggregate_seq)`; Index `(geo, seq)`. |
+| `zones_snapshots` | `aggregate_id`, `aggregate_seq`, `taken_at`, `state BYTEA` (zstd-komprimiert). **Nicht** append-only: Default-Politik `KeepLast(2)`, ältere werden gelöscht (Point-in-time weiter zurück läuft über Archiv-Events). |
+| `ormpp_event_types` | Typ-Wörterbuch: `type_id SMALLINT` ↔ voller CloudEvents-Typ-String; Mapping im Speicher der Registry. |
+| `ormpp_checkpoints` | Cursor aller Konsumenten: `(consumer, geo, seq)` — Cursor-Vektor, einer je Geo. |
+
+**Effizienz-Entscheidungen (Nicht-Duplikation):**
+1. **Kein CloudEvents-Envelope in der Zeile** — `specversion`/`source`/`datacontenttype`/`time` sind konstant oder ableitbar; der Envelope wird beim Lesen/Export aus den Spalten rekonstruiert. CloudEvents ist Austauschformat, nicht Speicherformat.
+2. **Typ-String nur im Wörterbuch** — `type_id SMALLINT` (2 Bytes) statt ~36 Bytes Typ-String pro Event.
+3. **`data` enthält nur das Delta** — nie den vollen Zustand; der wohnt in Read-Model und Snapshots.
+4. **Keine Outbox für ES-Modelle** — das Event-Log *ist* die Outbox; Projektionen, `OnEvent`-Reaktoren und Geo-Replikate sind Cursor über dieselbe Tabelle (`ormpp_checkpoints`). Jedes Event liegt exakt einmal auf der Platte. `ormpp_outbox` existiert nur für CRUD-Modelle (Dual-Write-Nachzug, GeoFlexible-Replikation).
+
+Fixkosten ≈ 100–120 Bytes/Event + Payload.
+
+**Sequenzen & Yugabyte:** `seq` ist je Geo monoton, nicht global — eine globale Sequenz wäre auf verteilten Clustern ein Hotspot. Garantien: strikte Ordnung pro Aggregat (`aggregate_seq`) und pro Region (`seq`); keine (unnötige) Totalordnung über Regionen.
+
+**Archivierung:** Events älter als der vorletzte Snapshot wandern in Archiv-Partitionen — PG/YB: Seq-Range-Partition abhängen (kein zeilenweises Kopieren); SQLite: Nebentabellen, batchweise. `History()`/`GetAt()` lesen transparent heiß + Archiv. Optional `orm.ArchiveCompression(zstd)` pro Zeile; Default unkomprimiert (Archiv bleibt SQL-abfragbar).
+
+## 6. Topologie & Instanziierung (Entwurf)
 
 Drei bewusst getrennte Geo-Begriffe:
 
@@ -215,7 +239,7 @@ Drei Modi bei der Registrierung:
 - Umzug/Änderung: `repo.SetGeo(ctx, id, neueHeimat, orm.ReplicateTo(...))` — engine-geführt.
 - Topologie-Integration: neue Region ⇒ `GeoGlobal`/`ReplicateAll`-Daten werden in der `bootstrapping`-Phase nachrepliziert; Draining ⇒ Replikate werden verworfen, nur Heimat-Datensätze ziehen per Backfill um.
 
-## 6. Größte Risiken
+## 7. Größte Risiken
 
 1. **Dual-Write-Migration** ist die anspruchsvollste Komponente (Konfliktfälle: Schreiben in alt während Backfill läuft; Reihenfolge-Garantien). Früh ein präzises Zustandsmodell (State machine) definieren und als ADR festhalten, bevor Code entsteht.
 2. **SQLite-Nebenläufigkeit**: eine Schreib-Connection, WAL-Modus Pflicht; Outbox/Worker-Design darf nicht stillschweigend Postgres-Semantik (SKIP LOCKED) voraussetzen.
