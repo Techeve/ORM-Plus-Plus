@@ -52,9 +52,10 @@ Stand: 2026-07-07. Basiert auf dem Hand-off-Brief plus Interview-Entscheidungen.
 ```
 
 Grundregeln:
+- **Oberstes Prinzip — Verhaltensgleichheit (perfekter Abstraktions-Layer):** Für die App ist irrelevant, welche Datenbank darunter liegt. Jede Deklaration wird auf jedem Backend akzeptiert und semantisch erfüllt — nativ, wo die DB es kann; emuliert oder kollabiert, wo nicht. Beispiel: eine Topologie mit fünf Regionen auf SQLite ist gültig; SQLite hat implizit die eine Region `local`, alle deklarierten Regionen mappen darauf. Gleiches gilt für Single-Region-Postgres. Die API antwortet überall identisch; App-Code darf **nie** nach dem Backend verzweigen — dieselbe Anwendung läuft byte-identisch auf SQLite (Demo/Desktop), Postgres (On-Prem) und Yugabyte (Cloud). Einzige Ausnahme: Observability-APIs (`MigrationStatus` u. Ä.) zeigen dem *Betreiber* die physische Wahrheit (z. B. eine Region `local`), niemals eine vorgetäuschte Topologie.
 - Jede systemseitige Tabelle (Events, Snapshots, Projektionen, Outbox, Leases, Schema-Versionen, Migrationszustand) trägt von Anfang an `tenant_id UUID` und die Geo-Spalte(n).
 - Koordination (Migrations-Leader, Projektions-Leases) läuft über **Lease-Tabellen mit Fencing**, nicht über Postgres-Advisory-Locks — die sind auf YugabyteDB nicht verlässlich verfügbar und auf SQLite ohnehin nicht.
-- Kein Feature landet im Core, das nicht auf allen drei Dialekten (nativ oder emuliert) darstellbar ist.
+- Kein Feature landet im Core, das nicht auf allen drei Dialekten (nativ oder emuliert) darstellbar ist — und die Test-Suite prüft jedes Feature **verhaltensgleich** auf allen dreien.
 
 ## 3. Phasen
 
