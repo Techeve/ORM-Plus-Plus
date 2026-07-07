@@ -28,6 +28,9 @@ Stand: 2026-07-07. Basiert auf dem Hand-off-Brief plus Interview-Entscheidungen.
 | Aggregat-Basis | ES-Modelle betten `orm.Aggregate` ein. `Load`/`AtVersion`/`AtTime`/`History`/`Append`/`Refresh` sowie Versions-/Snapshot-Zugriff existieren dadurch **von Haus aus** (snapshot-transparent). Einzige Pflicht des Entwicklers: `Apply(orm.Event) error`. |
 | Event-Trigger | Jedes `Append` löst automatisch über die Outbox aus: (1) eingebaute Projektion, (2) registrierbare Read-View-Generatoren (`orm.OnEvent`, persistent, at-least-once, checkpointed, rebuildfähig), (3) Live-Streams (`orm.Watch`) für Echtzeit-UIs (flüchtig; Verlässlichkeit kommt aus (2)). |
 | CRUD-API | Typisiertes Repository `orm.Repo[T]` mit Insert/Get/Update/Upsert/Delete, Query-Builder, `db.Tx` über mehrere Modelle — wie im API-Entwurf vom 2026-07-07 abgenommen. |
+| Tenant-freie Modelle | `orm.TenantFree()` als Model-Option für technische Tabellen ohne Nutzerdaten: keine Tenant-Spalte, kein Tenant-Filter, nutzbar ohne Tenant im Context. Default bleibt tenant-gebunden. |
+| Referenzen | `ref=Model[,ondelete=restrict\|cascade\|setnull]`-Tag; Durchsetzung wie beim Tenant (Engine-Prüfung überall + FK wo nativ). Referenzen nur innerhalb desselben Tenants (Ausnahme: Ziel ist TenantFree/GeoGlobal); TenantFree → tenant-gebunden ist verboten (Registrierungsfehler). Ziele dürfen ES-Modelle sein (Prüfung gegen Read-Model). Kein Eager-Loading in v1. |
+| Feld-Constraints | `immutable` (write-once wie `tenant_id`, nie im UPDATE), `required` (Zero-Value beim Insert ⇒ `ErrRequiredField`). NULL-Fähigkeit aus dem Go-Typ: Pointer = nullable, sonst NOT NULL. |
 
 ## 2. Architektur-Schichten
 

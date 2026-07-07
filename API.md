@@ -190,6 +190,12 @@ orm.EventSourced()    // Event-Sourcing (Struct muss orm.Aggregate einbetten)
 
 Registrierung passiert beim Start, vor `Migrate`. Die Registry validiert das Struct (Tags, PK, Einbettung) und kompiliert den Mapping-Plan einmalig (keine Reflection im Hot Path).
 
+**Scope-Optionen:**
+
+| Option | Bedeutung |
+|---|---|
+| `orm.TenantFree()` | Model ohne Tenant-Spalte und ohne Tenant-Filter — für **technische Tabellen ohne Nutzerdaten** (Konfiguration, Lookup-Werte, Job-Zustände). Operationen funktionieren auch mit Context ohne Tenant. Tenant-gebundene Modelle bleiben der Default; die Option ist die dokumentierte Ausnahme. |
+
 **Geo-Modi** (Model-Option, Default `GeoScoped`):
 
 | Option | Bedeutung |
@@ -229,10 +235,15 @@ type ProviderAccount struct {
 | `json` | Verschachtelte Werte als JSON(B)-Spalte (v1; Untertabellen in Stufe 2) |
 | `version` | Spalte für optimistisches Locking bei `Update` |
 | `autocreate`, `autoupdate` | Zeitstempel-Pflege durch die Engine |
+| `ref=Model[,ondelete=…]` | Referenz auf ein anderes Model (Abschnitt 5.4) |
+| `immutable` | Write-once: wird beim Insert gesetzt, danach unveränderlich — die Engine nimmt das Feld in kein `UPDATE` auf (gleiches Verhalten wie `tenant_id`) |
+| `required` | Muss beim Insert explizit gesetzt sein: Zero-Value ⇒ `orm.ErrRequiredField` |
 | `deprecated` | Feld ist zur Entfernung markiert (Expand/Contract, Abschnitt 8) |
 | `-` | Feld wird nicht persistiert |
 
-`tenant_id` und die Geo-Spalten deklariert man **nicht** — sie sind implizit in jeder Tabelle vorhanden und werden ausschließlich über den Context gesteuert.
+**NULL-Fähigkeit** ergibt sich aus dem Go-Typ, nicht aus einem Tag: Nicht-Pointer-Felder sind `NOT NULL` (der Go-Zero-Value ist der Default), Pointer-Felder (`*string`, `*time.Time`) erlauben `NULL`. `required` verschärft das für Nicht-Pointer-Felder: Auch der Zero-Value ist beim Insert unzulässig — der Wert *muss* bewusst gesetzt werden.
+
+`tenant_id` und die Geo-Spalten deklariert man **nicht** — sie sind implizit in jeder Tabelle vorhanden (außer bei `TenantFree`-Modellen) und werden ausschließlich über den Context gesteuert.
 
 ### 5.3 Vollständiges Deklarationsbeispiel
 
@@ -259,6 +270,30 @@ orm.Register[DNSZone](db, orm.EventSourced(),
     orm.SnapshotKeepLast(2),
 )
 ```
+
+### 5.4 Referenzen zwischen Modellen
+
+Beziehungen werden per `ref`-Tag deklariert und mit derselben Doppel-Durchsetzung abgesichert wie der Tenant: Engine-Prüfung auf allen Backends plus FK-Constraint, wo die DB das nativ kann — Verhalten überall identisch.
+
+```go
+type Document struct {
+    ID        orm.ID `orm:"pk"`
+    Title     string `orm:"required"`
+    CreatedBy orm.ID `orm:"ref=User,immutable,required"`   // Ersteller: Pflicht, unveränderlich
+    ProjectID orm.ID `orm:"ref=Project,ondelete=cascade"`  // Dokument stirbt mit dem Projekt
+    ReviewerID *orm.ID `orm:"ref=User"`                    // optional (Pointer ⇒ NULL erlaubt)
+}
+```
+
+**Regeln:**
+
+1. **Insert/Update-Verifikation:** Der referenzierte Datensatz muss existieren — sonst `orm.ErrInvalidReference`. Geprüft im selben Schritt wie die Tenant-Verifikation.
+2. **Tenant-Kopplung:** Referenzen dürfen nur auf Datensätze **desselben Tenants** zeigen (Ausnahme: das Ziel-Model ist `TenantFree` oder `GeoGlobal`-Stammdaten). Ein `TenantFree`-Model darf **nicht** auf ein tenant-gebundenes Model verweisen — das lehnt bereits die Registrierung ab, denn ohne Tenant-Scope wäre die Referenz nicht eindeutig prüfbar.
+3. **Löschverhalten** (`ondelete`, Default `restrict`): `restrict` — Löschen des Ziels schlägt fehl, solange Verweise existieren (`orm.ErrReferenceInUse`); `cascade` — abhängige Datensätze werden mitgelöscht; `setnull` — Referenzfeld wird `NULL` (nur bei Pointer-Feldern zulässig, sonst Registrierungsfehler).
+4. **Ziel-Typen:** Referenzen zeigen immer auf den Primärschlüssel. Ziel darf auch ein ES-Model sein — geprüft wird gegen dessen Read-Model; `ondelete`-Aktionen löst dort das Lösch-Event aus.
+5. **Geo:** Referenzen über Regionsgrenzen sind erlaubt (z. B. auf `GeoGlobal`-Stammdaten immer lokal prüfbar); bei `GeoScoped`-Zielen in fremden Regionen prüft die Engine remote — mit Latenz, aber korrekt (Grundprinzip Verhaltensgleichheit).
+
+Kein Eager-Loading in v1 — Referenzen sind Integritätswerkzeug; geladen wird explizit (`orm.Repo[User](db).Get(ctx, doc.CreatedBy)`). Komfort-Loading (Joins/Preload) ist Stufe 2.
 
 ---
 
@@ -662,6 +697,9 @@ Alle Fehler sind mit `errors.Is` prüfbare Sentinel-Werte:
 | `orm.ErrNotFound` | Datensatz/Aggregat existiert nicht (im Tenant-/Geo-Scope) |
 | `orm.ErrNoTenant` | Context ohne Tenant (fail-closed) |
 | `orm.ErrUnknownTenant` | Tenant-ID existiert nicht im Register oder ist archiviert |
+| `orm.ErrRequiredField` | `required`-Feld beim Insert nicht gesetzt (Zero-Value) |
+| `orm.ErrInvalidReference` | `ref`-Ziel existiert nicht oder gehört zu einem anderen Tenant |
+| `orm.ErrReferenceInUse` | Löschen verweigert: Datensatz wird noch referenziert (`ondelete=restrict`) |
 | `orm.ErrNoGeo` | Mehr-Regionen-Topologie, aber kein Daten-Geo im Context |
 | `orm.ErrRegionNotActive` | Daten-Geo zeigt auf `bootstrapping`/`draining`/unbekannte Region |
 | `orm.ErrVersionConflict` | Optimistisches Locking: CRUD-`version` oder Aggregat-Version veraltet |
