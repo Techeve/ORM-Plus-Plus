@@ -174,7 +174,29 @@ In geo-partitionierten Clustern (Yugabyte: EU-Daten liegen nur auf EU-Knoten usw
 
 Das Instanzregister ist der Schlüssel für Dual-Write: Jede Instanz trägt sich bei `Open()` mit ihrer Schema-Version ein und heartbeatet; Instanzen ohne Heartbeat > TTL gelten als beendet. `FinalizeMigration` verweigert, solange eine lebende Instanz eine ältere Version meldet.
 
-## 5. Größte Risiken
+## 5. Topologie & Instanziierung (Entwurf)
+
+Drei bewusst getrennte Geo-Begriffe:
+
+| Begriff | Deklaration | Bedeutung |
+|---|---|---|
+| **Topologie** | `orm.Topology(orm.Region("eu-central", orm.Placement(...)), …)` — gespeichert in `ormpp_geo_regions` | Welche Regionen der Cluster hat (Cluster-Zustand, keine Instanz-Konfig) |
+| **Instanz-Geo** | `orm.InstanceGeo(...)` bei `Open()` | Wo dieser Prozess läuft (bestimmt Lease-/Worker-Zuteilung) |
+| **Daten-Geo** | `orm.WithGeo(ctx, ...)` pro Request | Wohin ein Datensatz gehört (bestimmt Partition/Placement) |
+
+**Bootstrap:** Jede Instanz deklariert dieselbe Topologie (gleiches Binary); die Bootstrap-/Migrations-Lease entscheidet, wer sie anwendet. `Migrate` legt Systemtabellen und pro geo-scoped Model die Partitionen je Region an (YB: Tablespaces/Placement; PG: Partitionen; SQLite: eine implizite Region). Es gibt keine „besondere erste Instanz".
+
+**Region hinzufügen:** additiver Topologie-Diff (neue `orm.Region(...)`-Zeile + Rollout). Regionen haben einen Lebenszyklus in `ormpp_geo_regions`: `bootstrapping → active → draining → removed`. In `bootstrapping` ist `WithGeo` auf die Region fail-closed; `draining` ist der Weg zum Entfernen — keine neuen Daten, Bestandsdaten ziehen per geo-verteiltem Backfill in andere Regionen um, erst dann `removed`.
+
+**Worker-Start (regionsgebunden):** braucht genau vier Dinge — DSN (regional nahe Endpunkte), `InstanceGeo`, `MigrationRole` (default `none`), dieselben Modell-/Topologie-/Versions-Deklarationen. Beim `Open`: Validierung des Instanz-Geo gegen `ormpp_geo_regions` (unbekannt/nicht aktiv ⇒ Startfehler), Eintrag ins Instanzregister, Heartbeat. Leases gibt es nur für die eigene Region; `Migrate` ist im Normalfall No-op.
+
+Zusätzliche Systemtabelle:
+
+| Tabelle | Zweck | Wichtigste Spalten |
+|---|---|---|
+| `ormpp_geo_regions` | Topologie-Register mit Lebenszyklus | `name`, `status` (bootstrapping/active/draining/removed), `placement`, `topology_version`, `created_at` |
+
+## 6. Größte Risiken
 
 1. **Dual-Write-Migration** ist die anspruchsvollste Komponente (Konfliktfälle: Schreiben in alt während Backfill läuft; Reihenfolge-Garantien). Früh ein präzises Zustandsmodell (State machine) definieren und als ADR festhalten, bevor Code entsteht.
 2. **SQLite-Nebenläufigkeit**: eine Schreib-Connection, WAL-Modus Pflicht; Outbox/Worker-Design darf nicht stillschweigend Postgres-Semantik (SKIP LOCKED) voraussetzen.
