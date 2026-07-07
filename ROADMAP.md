@@ -196,6 +196,24 @@ Zusätzliche Systemtabelle:
 |---|---|---|
 | `ormpp_geo_regions` | Topologie-Register mit Lebenszyklus | `name`, `status` (bootstrapping/active/draining/removed), `placement`, `topology_version`, `created_at` |
 
+### Geo-Modi pro Model & regionsübergreifende Datensätze
+
+Drei Modi bei der Registrierung:
+
+| Modus | Bedeutung | Umsetzung |
+|---|---|---|
+| `orm.GeoScoped()` | Genau eine Region pro Datensatz (Normalfall) | Geo-Partitionierung wie gehabt |
+| `orm.GeoGlobal()` | Model ist **immer in allen Regionen** vorhanden (Stammdaten: Tenants, Nutzer, Pläne) | YB: natives Replika-Placement + Follower-Reads, keine App-Kopien; PG/SQLite: wirkungslos (eine Region). Schreiben zahlt Cross-Region-Konsens — Registry warnt bei schreibintensiven Modellen |
+| `orm.GeoFlexible()` | **Pro Datensatz** wählbar: Heimatregion (autoritativ) + Replikat-Regionen (lesende Kopien) | `home_geo`-Spalte + `geo_replicas`-Liste; Kopien in den Partitionen der Zielregionen |
+
+`GeoFlexible` im Detail:
+- Deklaration pro Datensatz: `orm.WithGeo(ctx, "eu-central", orm.ReplicateTo("us-east"))` oder `orm.ReplicateAll()` (folgt der Topologie automatisch).
+- Schreiben geht atomar in die Heimat-Partition + Outbox; die Trigger-Kette fächert an die Replikat-Partitionen auf (at-least-once, checkpointed — dieselbe Maschinerie wie Projektionen). Replikate sind strikt lesend ⇒ keine Konflikte.
+- Schreibzugriff auf ein Replikat: per Model-Option `orm.WriteForwarding()` (an Heimat weiterleiten) oder `orm.WriteHomeOnly()` (Fehler).
+- Lesen ist lokal-bevorzugt: lokale Kopie wenn vorhanden, sonst Heimatregion.
+- Umzug/Änderung: `repo.SetGeo(ctx, id, neueHeimat, orm.ReplicateTo(...))` — engine-geführt.
+- Topologie-Integration: neue Region ⇒ `GeoGlobal`/`ReplicateAll`-Daten werden in der `bootstrapping`-Phase nachrepliziert; Draining ⇒ Replikate werden verworfen, nur Heimat-Datensätze ziehen per Backfill um.
+
 ## 6. Größte Risiken
 
 1. **Dual-Write-Migration** ist die anspruchsvollste Komponente (Konfliktfälle: Schreiben in alt während Backfill läuft; Reihenfolge-Garantien). Früh ein präzises Zustandsmodell (State machine) definieren und als ADR festhalten, bevor Code entsteht.
