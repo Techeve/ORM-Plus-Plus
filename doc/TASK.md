@@ -26,7 +26,7 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 ## Vor dem Release (v1.0-Tag)
 
 - Lizenzentscheidung (permissiv angedacht) — Entscheidung des Betreibers.
-- Lasttests (Append-Durchsatz, Projektions-Lag, Backfill unter Last) und Fehlerinjektion (Worker-Ausfall mitten in Migration/Projektion).
+- ~~Lasttests~~ ✅ Benchmark-Harness `examples/bench`: Append-Durchsatz, Projektions-Aufholzeit und alle CRUD-Pfade gegen alle drei Backends, Bericht als JSON + Go-Benchmark-Format (benchstat). Offen bleibt Fehlerinjektion (Worker-Ausfall mitten in Migration/Projektion) und ein Lauf gegen einen echten YB-Cluster (Docker-Single-Node misst Konsens-Overhead ohne Skalierungsvorteil).
 - ~~Beispielprojekt~~ ✅ `examples/demo` (Mini-DNS-Muster, zwei App-Generationen, jede Fähigkeit einmal, durchkommentiert; `go run ./examples/demo`).
 - Release: Git-Tag `v1.0.0` → CI erzeugt Changelog + GitLab-Release.
 
