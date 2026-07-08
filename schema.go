@@ -103,6 +103,11 @@ func createTableSQL(dial dialect, m *model) []string {
 		cols = append(cols, `tenant_id TEXT NOT NULL REFERENCES ormpp_tenants (tenant_id)`)
 	}
 	cols = append(cols, `geo TEXT NOT NULL DEFAULT 'local'`)
+	if m.opts.geoMode == geoFlexible {
+		// Heimat + lesende Replikat-Regionen pro Datensatz (JSON-Liste;
+		// "*" = ReplicateAll, folgt der Topologie).
+		cols = append(cols, `geo_replicas TEXT NOT NULL DEFAULT '[]'`)
+	}
 
 	for _, f := range m.fields {
 		// Kein FK auf ES-Read-Models: deren Zeilen sind rebuildbare Artefakte

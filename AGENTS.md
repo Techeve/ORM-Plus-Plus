@@ -8,7 +8,7 @@ korrekt auf diesem Projekt arbeiten zu können. Vor dem ersten Tool-Call hier le
 **Name:** ORM++
 **Import-Pfad:** `gitlab.techeve.de/orm-plus-plus/orm-plus-plus`
 **Go-Version:** 1.26
-**Status:** Phasen 1–4b abgeschlossen ✅ — CRUD, Event Sourcing, Migrations-Engine, PG/YB-Adapter, native Geo-Partitionierung, Archivierung, Worker-Leases. Suite läuft backend-identisch auf allen dreien. Nächstes: Phase 5 (v1.0-Härtung).
+**Status:** Phasen 1–5 abgeschlossen ✅ — die komplette v1-API ist implementiert, keine Stubs mehr. 48 Tests laufen backend-identisch auf SQLite, PostgreSQL und YugabyteDB. Vor dem v1.0-Tag: Lizenz, Lasttests, Beispielprojekt (doc/TASK.md „Vor dem Release").
 
 ORM++ ist eine Go-Library für model-first Persistenz: klassisches ORM-Mapping **plus**
 Event Sourcing, Projektionen, Snapshots und Expand/Contract-Migrationen — optimiert für
@@ -45,7 +45,7 @@ DB-Details.
 
 ## 4. Implementierungsstand
 
-### Phase 1 (CRUD) + Phase 2 (Event Sourcing) + Phase 3 (Migration) auf SQLite ✅ (35 Tests, CI grün)
+### Phasen 1–5 ✅ (48 Tests, CI-Matrix SQLite/PG/YB grün)
 
 | Datei | Inhalt |
 |---|---|
@@ -61,8 +61,10 @@ DB-Details.
 | `db.go` | `DB`-Struct, `Open`, `Register[T]`, `Migrate` (Erstinstallation/No-op/Upgrade), `Tx`, `Topology`, `Tenants`, `StartWorkers`/`Close` |
 | `schema.go` | DDL-Generierung (CRUD + ES-Read-Model/Events/Snapshots), additiver Diff |
 | `values.go` | Typ-Konversionen, `scanModelRows[T]` (inkl. Aggregat-Verdrahtung bei ES) |
-| `tenants.go` | `TenantRegistry`: Create/Get/List/Archive + Cache + Insert-Verifikation |
-| `repo.go` | `Repository[T]` (CRUD; auf ES-Modellen gesperrt) |
+| `tenants.go` | `TenantRegistry`: Create/Get/List/Archive/Export (DSGVO, JSON Lines)/Purge (auditiert) + Cache + Insert-Verifikation |
+| `repo.go` | `Repository[T]` (CRUD; auf ES-Modellen gesperrt), `SetGeo` (GeoFlexible) |
+| `crypto.go` | `encrypted`-Felder: AES-256-GCM, `KeyProvider`/`StaticKey`, Key-ID im Ciphertext (Rotation) |
+| `observe.go` | `MigrationStatus` (Phase/Fortschritt/Worker je Region), `Health` (Instanzen/Lag/Regionen) |
 | `query.go` | `QueryBuilder[T]` + freies `orm.Query[T]` (läuft auch gegen ES-Read-Models) |
 | `event.go` | `Event`, `CloudEvent`, `Position`, `Events`/`E`/`V`, Typ-Wörterbuch, Hot/Archiv-Union-Quelle |
 | `aggregate.go` | `orm.Aggregate`: `New`/`Load`/`Append`/`Refresh`/`AtVersion`/`AtTime`/`History`, Fold-Kern |
@@ -75,19 +77,18 @@ DB-Details.
 
 Tests: `crud_test.go` (Phase 1), `es_test.go` (Phase 2), `migration_test.go` (Phase 3) — laufen **unverändert** gegen alle drei Backends. Backend-Wahl über `ORMPP_TEST_BACKEND` (sqlite|postgres|yugabyte) + `ORMPP_TEST_DSN` (`backend_test.go`: Schema-pro-Test-Isolation). Lokal: `docker compose up -d` (PG auf 5433, YB-YSQL auf 5434), siehe README.
 
-### Absichtliche Stubs / bewusste Grenzen
+### Bewusste Grenzen (keine API-Stubs mehr — alles Deklarierte funktioniert)
 
-| API | Fehler / Verhalten | Geplant |
+| Thema | Verhalten heute | Geplant |
 |---|---|---|
-| `repo.SetGeo` | gibt Fehler zurück | Phase 4b/5 |
-| `Tenants().Export` / `Purge` | gibt Fehler zurück | Phase 5 |
-| `encrypted`-Tag | Registrierungsfehler | Phase 5 |
-| `MigrationStatus`/`Health` | existiert noch nicht | Phase 5 |
-| Snapshot-/Archiv-Kompression (zstd) | unkomprimiert (SQL-abfragbar) | Phase 5 |
-| Archiv per Partition-Detach (statt Kopie) | Nebentabellen-Kopie auf allen Backends | Optimierung, später |
-| Dual-Write-Rückrichtung (neu→alt) | einseitig alt→neu via Trigger-Nachlauf; Rück-Transformation als `ReplaceModel`-Option geplant | Phase 5 |
-| GeoGlobal/GeoFlexible-Replikation, `ormpp_geo_regions`-Lebenszyklus | Register existiert; Regionen sofort active | Phase 5/Stufe 2 |
-| YB Smart Driver (`yugabyte/pgx`, Connection-Load-Balancing) | bewusst jackc/pgx (Fork hinkt Upstream; Treiber gekapselt → Drop-in später) | Re-Evaluation bei Multi-Node |
+| `encrypted` auf ES-Modellen (Payloads/Snapshots) | Migrate lehnt klar ab; CRUD voll unterstützt | später |
+| Physische GeoFlexible-Replikation (Fanout, YB-Placement) | Heimat/Replikate als validierte Metadaten (`geo`, `geo_replicas`); kollabierte Backends | Stufe 2 |
+| `ormpp_geo_regions`-Lebenszyklus (bootstrapping/draining) | Regionen sofort active | Stufe 2 |
+| Snapshot-/Archiv-Kompression (zstd) | unkomprimiert (SQL-abfragbar) | später |
+| Archiv per Partition-Detach (statt Kopie) | Nebentabellen-Kopie auf allen Backends | Optimierung |
+| Dual-Write-Rückrichtung (neu→alt) | einseitig alt→neu via Trigger-Nachlauf | `ReplaceModel`-Option, später |
+| YB Smart Driver (`yugabyte/pgx`) | bewusst jackc/pgx (gekapselt → Drop-in) | Re-Evaluation bei Multi-Node |
+| Lasttests/Fehlerinjektion, Beispielprojekt, Lizenz | offen | vor v1.0-Tag |
 
 ## 5. Coding-Konventionen
 
@@ -152,6 +153,6 @@ keine backend-spezifischen Assertions einbauen.
 | 3 | Migrations-Engine: Expand/Contract-Zustandsmaschine, Backfill, Dual-Write-Nachlauf, Finalize, Instanzregister/Leases (5 Tests) | ✅ |
 | 4 | PostgreSQL- und YugabyteDB-Adapter, Suite backend-identisch (Docker/CI-Matrix) | ✅ |
 | 4b | Native Geo-Partitionierung, Archivierung (Union-Reads), Worker-Leases, Geo-Pinning, Topologie-Register | ✅ |
-| 5 | v1.0-Härtung: Encryption, Export/Purge, MigrationStatus/Health, Standalone-Worker, Lasttests | ⏳ nächste |
+| 5 | v1.0-Härtung: Encryption, Export/Purge, MigrationStatus/Health, SetGeo/GeoFlexible-Metadaten | ✅ |
 
 Vollständiger Phasenplan inkl. physischem Schema: [doc/ROADMAP.md](doc/ROADMAP.md).

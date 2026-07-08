@@ -13,7 +13,7 @@ Die konsumierende Anwendung deklariert Modelle (Go-Structs mit Tags) und arbeite
 
 ## Status
 
-In Entwicklung (Phase 0/1) — noch keine stabile API.
+Funktional vollständig (Phasen 1–5): CRUD, Event Sourcing (CloudEvents, Snapshots, Archivierung), Expand/Contract-Migrationen mit Dual-Write, Multi-Tenancy (inkl. DSGVO-Export/-Purge), Feld-Verschlüsselung, Geo-Partitionierung und Observability — verhaltensgleich auf allen drei Backends. Vor dem v1.0-Release: Lizenz, Lasttests, Beispielprojekt ([doc/TASK.md](doc/TASK.md)).
 
 ## Entwicklung
 

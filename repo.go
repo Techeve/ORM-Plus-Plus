@@ -3,6 +3,7 @@ package orm
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -104,6 +105,15 @@ func (r *repo[T]) prepareWrite(ctx context.Context, e *T, tenant ID, geo string)
 	}
 	cols = append(cols, "geo")
 	vals = append(vals, geo)
+	if r.m.opts.geoMode == geoFlexible {
+		g, _ := geoFrom(ctx)
+		reps, err := d.replicasJSON(g)
+		if err != nil {
+			return nil, nil, err
+		}
+		cols = append(cols, "geo_replicas")
+		vals = append(vals, reps)
+	}
 	return cols, vals, nil
 }
 
@@ -355,8 +365,72 @@ func (r *repo[T]) Delete(ctx context.Context, id ID) error {
 	return nil
 }
 
+// SetGeo verlegt Heimatregion und Replikat-Liste eines GeoFlexible-
+// Datensatzes (engine-geführt, tenant-gescoped). Auf kollabierten Backends
+// (SQLite/Single-Region) sind das Platzierungs-Metadaten; die physische
+// Replikat-Verteilung folgt mit dem YB-Placement (Stufe 2).
 func (r *repo[T]) SetGeo(ctx context.Context, id ID, home string, opts ...GeoOption) error {
-	return fmt.Errorf("orm: SetGeo ist noch nicht implementiert (GeoFlexible-Mechanik, siehe doc/TASK.md)")
+	d := r.h.db()
+	if r.m == nil {
+		return fmt.Errorf("orm: Model %T ist nicht registriert", *new(T))
+	}
+	if r.m.kind == kindEventSourced {
+		return fmt.Errorf("orm: %s ist event-sourced — SetGeo gilt für CRUD-Modelle", r.m.name)
+	}
+	if r.m.opts.geoMode != geoFlexible {
+		return fmt.Errorf("orm: %s ist nicht GeoFlexible — SetGeo braucht orm.GeoFlexible()", r.m.name)
+	}
+	var tenant ID
+	if r.m.tenanted() {
+		t, ok := tenantFrom(ctx)
+		if !ok {
+			return ErrNoTenant
+		}
+		tenant = t
+	}
+	if !d.validGeo(home) {
+		return fmt.Errorf("%w: %q", ErrRegionNotActive, home)
+	}
+	g := geoScope{home: home}
+	for _, o := range opts {
+		o(&g)
+	}
+	reps, err := d.replicasJSON(g)
+	if err != nil {
+		return err
+	}
+	query := fmt.Sprintf("UPDATE %q SET geo = ?, geo_replicas = ? WHERE %q = ?", r.m.table, r.m.pk.column)
+	args := []any{home, reps, id.String()}
+	if r.m.tenanted() {
+		query += ` AND tenant_id = ?`
+		args = append(args, tenant.String())
+	}
+	res, err := r.h.q().ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// replicasJSON validiert und serialisiert die Replikat-Liste eines
+// GeoFlexible-Datensatzes ("*" = ReplicateAll).
+func (d *DB) replicasJSON(g geoScope) (string, error) {
+	if g.replicateAll {
+		return `["*"]`, nil
+	}
+	for _, r := range g.replicateTo {
+		if !d.validGeo(r) {
+			return "", fmt.Errorf("%w: %q", ErrRegionNotActive, r)
+		}
+	}
+	b, err := json.Marshal(append([]string{}, g.replicateTo...))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 func (r *repo[T]) Query(ctx context.Context) QueryBuilder[T] {

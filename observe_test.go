@@ -2,6 +2,8 @@ package orm
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -106,5 +108,80 @@ func TestHealthInstancesLagAndRegions(t *testing.T) {
 		if p.Consumer == "projection:ticket" && p.Lag != 0 {
 			t.Fatalf("Lag nach Projektion = %d, erwartet 0", p.Lag)
 		}
+	}
+}
+
+func TestSetGeoFlexible(t *testing.T) {
+	store := newTestStore(t)
+	bg := context.Background()
+
+	type SyncGroup struct {
+		ID   ID     `orm:"pk"`
+		Name string `orm:"required"`
+	}
+	type Plain struct {
+		ID   ID     `orm:"pk"`
+		Name string `orm:"required"`
+	}
+	db, err := Open(store())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	Register[SyncGroup](db, CRUD(), GeoFlexible(WriteForwarding()))
+	Register[Plain](db, CRUD())
+	Topology(db, Region("eu-central"), Region("us-east"))
+	if err := db.Migrate(bg); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithTenant(bg, SingleTenant)
+	eu := WithGeo(ctx, "eu-central", ReplicateTo("us-east"))
+
+	g := &SyncGroup{Name: "G"}
+	if err := Repo[SyncGroup](db).Insert(eu, g); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	var geo, reps string
+	if err := db.q().QueryRowContext(bg, `SELECT geo, geo_replicas FROM sync_group WHERE id = ?`, g.ID.String()).Scan(&geo, &reps); err != nil {
+		t.Fatal(err)
+	}
+	if geo != "eu-central" || reps != `["us-east"]` {
+		t.Fatalf("Insert-Metadaten: geo=%q replicas=%q", geo, reps)
+	}
+
+	// Umzug: Heimat US, Replikat EU.
+	if err := Repo[SyncGroup](db).SetGeo(ctx, g.ID, "us-east", ReplicateTo("eu-central")); err != nil {
+		t.Fatalf("SetGeo: %v", err)
+	}
+	if err := db.q().QueryRowContext(bg, `SELECT geo, geo_replicas FROM sync_group WHERE id = ?`, g.ID.String()).Scan(&geo, &reps); err != nil {
+		t.Fatal(err)
+	}
+	if geo != "us-east" || reps != `["eu-central"]` {
+		t.Fatalf("SetGeo-Metadaten: geo=%q replicas=%q", geo, reps)
+	}
+	// ReplicateAll als Marker.
+	if err := Repo[SyncGroup](db).SetGeo(ctx, g.ID, "eu-central", ReplicateAll()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.q().QueryRowContext(bg, `SELECT geo_replicas FROM sync_group WHERE id = ?`, g.ID.String()).Scan(&reps); err != nil {
+		t.Fatal(err)
+	}
+	if reps != `["*"]` {
+		t.Fatalf("ReplicateAll: %q", reps)
+	}
+
+	// Guards: unbekannte Region, Nicht-GeoFlexible, fremder Tenant, ohne Tenant.
+	if err := Repo[SyncGroup](db).SetGeo(ctx, g.ID, "mars"); !errors.Is(err, ErrRegionNotActive) {
+		t.Fatalf("SetGeo mars: %v", err)
+	}
+	if err := Repo[Plain](db).SetGeo(ctx, g.ID, "eu-central"); err == nil || !strings.Contains(err.Error(), "GeoFlexible") {
+		t.Fatalf("SetGeo auf GeoScoped: %v", err)
+	}
+	other, _ := db.Tenants().Create(bg, TenantInfo{Name: "X"})
+	if err := Repo[SyncGroup](db).SetGeo(WithTenant(bg, other.ID), g.ID, "eu-central"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetGeo fremder Tenant: %v", err)
+	}
+	if err := Repo[SyncGroup](db).SetGeo(bg, g.ID, "eu-central"); !errors.Is(err, ErrNoTenant) {
+		t.Fatalf("SetGeo ohne Tenant: %v", err)
 	}
 }

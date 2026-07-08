@@ -5,7 +5,9 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 
 ## Aktueller Schritt
 
-**Phase 5 in Arbeit** (v1.0-Härtung, ein Commit je Baustein):
+**Phase 5 abgeschlossen** — alle v1-API-Flächen sind implementiert, keine Stubs mehr. 48 Tests laufen backend-identisch auf SQLite, PostgreSQL und YugabyteDB. Vor einem v1.0-Tag stehen noch: Lizenzentscheidung (Betreiber), Lasttests/Fehlerinjektion und das Beispielprojekt (siehe „Vor dem Release").
+
+## Phase-5-Arbeitsplan (ein Commit je Baustein)
 
 | # | Baustein | Status |
 |---|---|---|
@@ -13,7 +15,20 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 | 5.2 | `Tenants().Export` — DSGVO-Auszug als JSON Lines: Kopfzeile + Zeilen aller tenant-gebundenen Modelle, ES-Events als CloudEvents-1.0-JSON (Hot + Archiv), Snapshots; encrypted-Felder entschlüsselt; archivierte Tenants exportierbar | ✅ |
 | 5.3 | `Tenants().Purge` — physisches Löschen über alle tenant-gebundenen Tabellen, Event-Logs, Archive, Snapshots und Alt-Tabellen laufender Migrationen; FK-sichere Reihenfolge (umgekehrte Topo-Sortierung); nur archivierte Tenants; atomar; auditiert in `ormpp_schema_history`; Tenant-Zeile + Cache entfernt | ✅ |
 | 5.4 | `MigrationStatus`/`Health` — Phase/Versionen/Fortschritt+Worker je Region; Instanzregister (Alive via TTL), Projektions-/View-Rückstand je Geo, Topologie-Status (SQLite: ehrlich eine Region `local`) | ✅ |
-| 5.5 | `SetGeo` (GeoFlexible-Metadaten) + Abschluss-Doku | ⏳ |
+| 5.5 | `SetGeo` + GeoFlexible-Metadaten: implizite `geo_replicas`-Spalte (JSON, `"*"` = ReplicateAll), Insert übernimmt `ReplicateTo`/`ReplicateAll` aus dem Context, `SetGeo` verlegt Heimat + Replikate (validiert, tenant-gescoped) | ✅ |
+
+## Phase-5-Notizen
+
+- **Standalone-Worker-Modus** braucht keinen eigenen Code: gleiches Binary-Muster, Instanz ruft `Open` (mit `InstanceGeo`/`MigrationRole`), `registerModels`, `Migrate`, `StartWorkers` und bedient keinen HTTP-Verkehr — die Aufgaben-Leases verteilen die Arbeit (API.md §9.2 galt schon, jetzt durch Lease-Koordination real).
+- **GeoFlexible physisch:** Auf kollabierten Backends sind Heimat/Replikate Platzierungs-Metadaten; die echte Replikat-Verteilung (YB-Placement, Trigger-Fanout) ist Stufe 2 — die API und die Daten sind dafür vorbereitet.
+- **encrypted auf ES-Modellen** (Payloads/Snapshots) bewusst auf später verschoben — Migrate lehnt sauber ab (API.md §5.5).
+
+## Vor dem Release (v1.0-Tag)
+
+- Lizenzentscheidung (permissiv angedacht) — Entscheidung des Betreibers.
+- Lasttests (Append-Durchsatz, Projektions-Lag, Backfill unter Last) und Fehlerinjektion (Worker-Ausfall mitten in Migration/Projektion).
+- Beispielprojekt (Mini-DNS-Muster: ES-Kern + CRUD-Rest) — kann als eigenes Repo entstehen.
+- Release: Git-Tag `v1.0.0` → CI erzeugt Changelog + GitLab-Release.
 
 ## Phase-4b-Arbeitsplan (Reihenfolge)
 
