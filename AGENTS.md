@@ -8,7 +8,7 @@ korrekt auf diesem Projekt arbeiten zu können. Vor dem ersten Tool-Call hier le
 **Name:** ORM++
 **Import-Pfad:** `gitlab.techeve.de/orm-plus-plus/orm-plus-plus`
 **Go-Version:** 1.26
-**Status:** Phasen 1–3 (CRUD, Event Sourcing, Migrations-Engine) + Phase 4 Kern (PostgreSQL/YugabyteDB-Adapter, Suite läuft backend-identisch) abgeschlossen ✅ — offen: Partitionierung/Archivierung (4b), dann Phase 5 (v1.0-Härtung).
+**Status:** Phasen 1–4b abgeschlossen ✅ — CRUD, Event Sourcing, Migrations-Engine, PG/YB-Adapter, native Geo-Partitionierung, Archivierung, Worker-Leases. Suite läuft backend-identisch auf allen dreien. Nächstes: Phase 5 (v1.0-Härtung).
 
 ORM++ ist eine Go-Library für model-first Persistenz: klassisches ORM-Mapping **plus**
 Event Sourcing, Projektionen, Snapshots und Expand/Contract-Migrationen — optimiert für
@@ -64,10 +64,10 @@ DB-Details.
 | `tenants.go` | `TenantRegistry`: Create/Get/List/Archive + Cache + Insert-Verifikation |
 | `repo.go` | `Repository[T]` (CRUD; auf ES-Modellen gesperrt) |
 | `query.go` | `QueryBuilder[T]` + freies `orm.Query[T]` (läuft auch gegen ES-Read-Models) |
-| `event.go` | `Event`, `CloudEvent`, `Position`, `Events`/`E`/`V`, Typ-Wörterbuch (`ormpp_event_types`) |
+| `event.go` | `Event`, `CloudEvent`, `Position`, `Events`/`E`/`V`, Typ-Wörterbuch, Hot/Archiv-Union-Quelle |
 | `aggregate.go` | `orm.Aggregate`: `New`/`Load`/`Append`/`Refresh`/`AtVersion`/`AtTime`/`History`, Fold-Kern |
 | `upcast.go` | `orm.Upcast`, Dekodierung mit Upcaster-Kette, Migrate-Validierung |
-| `projection.go` | Worker-Loop, Checkpoints, eingebaute Projektion, `OnEvent`/`Named`, Snapshots, `RebuildProjection`/`RebuildView`, WaitFor |
+| `projection.go` | Worker-Loop (lease-koordiniert), Checkpoints, eingebaute Projektion, `OnEvent`/`Named`, Snapshots, Archivierung, `RebuildProjection`/`RebuildView`, WaitFor |
 | `stream.go` | `Stream`, `Watch`, In-Process-Live-Hub |
 | `migration.go` | Deklarations-API: `MigrationPlan`/`RowsPerSecond`, `MigrationTo`, `ReplaceModel[Old,New]` (V-Suffix-Konvention), `BatchScript`/`Batch` (Checkpoints) |
 | `migrator.go` | Zustandsmaschine idle→expanding→backfill→dual-write→finalizing, Backfill (checkpointed/drosselbar), Dual-Write-Trigger + Queue-Drain, `FinalizeMigration`, deprecated-Verwaltung |
@@ -83,9 +83,11 @@ Tests: `crud_test.go` (Phase 1), `es_test.go` (Phase 2), `migration_test.go` (Ph
 | `Tenants().Export` / `Purge` | gibt Fehler zurück | Phase 5 |
 | `encrypted`-Tag | Registrierungsfehler | Phase 5 |
 | `MigrationStatus`/`Health` | existiert noch nicht | Phase 5 |
-| Native Geo-Partitionierung + Archiv-Tabellen, Snapshot-Kompression | Events bleiben im Hot-Log (eine Tabelle), Snapshots unkomprimiert | Phase 4b |
-| Lease-Koordination der Projektions-Worker | ein Worker-Loop pro Instanz, unkoordiniert (Migrations-Leader nutzt Leases bereits) | Phase 4b |
+| Snapshot-/Archiv-Kompression (zstd) | unkomprimiert (SQL-abfragbar) | Phase 5 |
+| Archiv per Partition-Detach (statt Kopie) | Nebentabellen-Kopie auf allen Backends | Optimierung, später |
 | Dual-Write-Rückrichtung (neu→alt) | einseitig alt→neu via Trigger-Nachlauf; Rück-Transformation als `ReplaceModel`-Option geplant | Phase 5 |
+| GeoGlobal/GeoFlexible-Replikation, `ormpp_geo_regions`-Lebenszyklus | Register existiert; Regionen sofort active | Phase 5/Stufe 2 |
+| YB Smart Driver (`yugabyte/pgx`, Connection-Load-Balancing) | bewusst jackc/pgx (Fork hinkt Upstream; Treiber gekapselt → Drop-in später) | Re-Evaluation bei Multi-Node |
 
 ## 5. Coding-Konventionen
 
@@ -148,7 +150,8 @@ keine backend-spezifischen Assertions einbauen.
 | 1 | CRUD auf SQLite, Model-Registry, Schema, Tenants (17 Tests) | ✅ |
 | 2 | Event Sourcing: `orm.Aggregate`, Append, Projektion, OnEvent/Watch, Upcaster, Snapshots, WaitFor (12 Tests) | ✅ |
 | 3 | Migrations-Engine: Expand/Contract-Zustandsmaschine, Backfill, Dual-Write-Nachlauf, Finalize, Instanzregister/Leases (5 Tests) | ✅ |
-| 4 | PostgreSQL- und YugabyteDB-Adapter | ⏳ nächste |
-| 5 | v1.0-Härtung: Encryption, Export/Purge, MigrationStatus/Health | — |
+| 4 | PostgreSQL- und YugabyteDB-Adapter, Suite backend-identisch (Docker/CI-Matrix) | ✅ |
+| 4b | Native Geo-Partitionierung, Archivierung (Union-Reads), Worker-Leases, Geo-Pinning, Topologie-Register | ✅ |
+| 5 | v1.0-Härtung: Encryption, Export/Purge, MigrationStatus/Health, Standalone-Worker, Lasttests | ⏳ nächste |
 
 Vollständiger Phasenplan inkl. physischem Schema: [doc/ROADMAP.md](doc/ROADMAP.md).

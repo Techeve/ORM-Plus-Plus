@@ -28,9 +28,10 @@ func setCheckpoint(ctx context.Context, q queryer, consumer, geo string, seq int
 	return err
 }
 
-// eventGeos liefert alle Geos, die im Event-Log eines Models vorkommen.
+// eventGeos liefert alle Geos, die im Event-Log eines Models vorkommen
+// (inkl. Archiv — für Rebuilds vollständig archivierter Geos).
 func (d *DB) eventGeos(ctx context.Context, m *model) ([]string, error) {
-	rows, err := d.q().QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT geo FROM %q`, esEventsTable(m)))
+	rows, err := d.q().QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT geo FROM %s`, esEventsFrom(m, true)))
 	if err != nil {
 		return nil, err
 	}
@@ -70,9 +71,22 @@ func (d *DB) workerLoop(ctx context.Context) {
 	}
 }
 
+// workerLeaseTTL: Aufgaben-Leases der Worker; Failover nach Ablauf.
+const workerLeaseTTL = 15 * time.Second
+
+// tryLease nimmt/erneuert eine Worker-Lease (sticky: der Halter erneuert bei
+// jedem Durchlauf; stirbt er, übernimmt eine andere Instanz nach TTL —
+// Close gibt Leases sofort frei).
+func (d *DB) tryLease(ctx context.Context, name string) bool {
+	ok, err := d.acquireLease(ctx, name, workerLeaseTTL)
+	return err == nil && ok
+}
+
 // processOnce fährt einen Verarbeitungsdurchlauf: Heartbeat, Projektionen,
-// Reaktoren, Snapshots, Dual-Write-Nachlauf. Fehler werden geschluckt und im
-// nächsten Durchlauf erneut versucht (Checkpoints bleiben stehen — at-least-once).
+// Snapshots, Archivierung, Reaktoren, Dual-Write-Nachlauf. Jede Aufgabe ist
+// lease-koordiniert — clusterweit arbeitet genau eine Instanz daran. Fehler
+// werden geschluckt und im nächsten Durchlauf erneut versucht (Checkpoints
+// bleiben stehen — at-least-once).
 func (d *DB) processOnce(ctx context.Context) {
 	if !d.migrated {
 		return
@@ -86,16 +100,25 @@ func (d *DB) processOnce(ctx context.Context) {
 		if m.kind != kindEventSourced {
 			continue
 		}
+		if !d.tryLease(ctx, "worker:es:"+m.table) {
+			continue
+		}
 		_ = d.processProjection(ctx, m)
 		_ = d.maybeSnapshot(ctx, m)
+		_ = d.maybeArchive(ctx, m)
 	}
 	d.reactorMu.Lock()
 	reactors := append([]*reactor(nil), d.reactors...)
 	d.reactorMu.Unlock()
 	for _, r := range reactors {
+		if !d.tryLease(ctx, "worker:view:"+r.name) {
+			continue
+		}
 		_ = d.processReactor(ctx, r)
 	}
-	_ = d.drainDualWrite(ctx)
+	if d.tryLease(ctx, "worker:dualwrite") {
+		_ = d.drainDualWrite(ctx)
+	}
 }
 
 // --- Eingebaute Projektion (Read-Model) ---
@@ -261,8 +284,10 @@ func (d *DB) processReactor(ctx context.Context, r *reactor) error {
 			if err != nil {
 				return err
 			}
-			query := fmt.Sprintf(`SELECT %s FROM %q WHERE geo = ? AND seq > ? ORDER BY seq LIMIT 500`,
-				esEventSelect(m), esEventsTable(m))
+			// Reaktoren lesen Hot + Archiv: RebuildView spielt auch bereits
+			// archivierte Events erneut ein.
+			query := fmt.Sprintf(`SELECT %s FROM %s WHERE geo = ? AND seq > ? ORDER BY seq LIMIT 500`,
+				esEventSelect(m), esEventsFrom(m, true))
 			batch, err := fetchEventRows(ctx, d.q(), m, query, []any{geo, cp})
 			if err != nil {
 				return err
@@ -449,6 +474,102 @@ func (d *DB) snapshotAggregate(ctx context.Context, m *model, aggID string, tena
 		_, err := tx.q().ExecContext(ctx, prune, aggID, aggID)
 		return err
 	})
+}
+
+// --- Archivierung ---
+
+// maybeArchive verschiebt Events unterhalb des zweitjüngsten Snapshots in
+// die Archiv-Nebentabelle — batchweise, idempotent, nie über den
+// Projektions-Checkpoint hinaus (das Read-Model liest nur den Hot-Log).
+// Laden bleibt korrekt: Der Normalpfad faltet Snapshot + Hot-Events;
+// Historie/Zeitreisen/Rebuilds lesen transparent Hot + Archiv.
+func (d *DB) maybeArchive(ctx context.Context, m *model) error {
+	if m.opts.snapshotDisabled {
+		return nil // ohne Snapshots keine sichere Archiv-Grenze
+	}
+	ev, arch, sn := esEventsTable(m), esArchiveTable(m), esSnapsTable(m)
+
+	// Archiv-Grenze je Aggregat: der zweitjüngste Snapshot.
+	type bound struct {
+		id  string
+		seq int64
+	}
+	var bounds []bound
+	{
+		rows, err := d.q().QueryContext(ctx, fmt.Sprintf(`
+			SELECT s.aggregate_id, MAX(s.aggregate_seq) FROM %q s
+			WHERE s.aggregate_seq < (SELECT MAX(s2.aggregate_seq) FROM %q s2 WHERE s2.aggregate_id = s.aggregate_id)
+			GROUP BY s.aggregate_id`, sn, sn))
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var b bound
+			if err := rows.Scan(&b.id, &b.seq); err != nil {
+				rows.Close()
+				return err
+			}
+			bounds = append(bounds, b)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+	}
+	if len(bounds) == 0 {
+		return nil
+	}
+
+	// Projektions-Checkpoints je Geo (Obergrenze der Log-Sequenz).
+	cps := map[string]int64{}
+	geos, err := d.eventGeos(ctx, m)
+	if err != nil {
+		return err
+	}
+	for _, geo := range geos {
+		cp, err := getCheckpoint(ctx, d.q(), "projection:"+m.table, geo)
+		if err != nil {
+			return err
+		}
+		cps[geo] = cp
+	}
+
+	cols := `"aggregate_id", "aggregate_seq", "geo", "seq", "event_id", "occurred_at", "type_id", "data"`
+	if m.tenanted() {
+		cols += `, "tenant_id"`
+	}
+	for _, b := range bounds {
+		// Heimat-Geo des Aggregats (Geo-Pinning) für die Checkpoint-Grenze.
+		var geo string
+		switch err := d.q().QueryRowContext(ctx,
+			fmt.Sprintf(`SELECT geo FROM %q WHERE aggregate_id = ? ORDER BY aggregate_seq DESC LIMIT 1`, ev),
+			b.id).Scan(&geo); err {
+		case nil:
+		case sql.ErrNoRows:
+			continue // bereits vollständig archiviert
+		default:
+			return err
+		}
+		cp := cps[geo]
+		if cp == 0 {
+			continue
+		}
+		err := d.Tx(ctx, func(tx Tx) error {
+			move := fmt.Sprintf(`INSERT INTO %q (%s) SELECT %s FROM %q
+				WHERE aggregate_id = ? AND aggregate_seq <= ? AND seq <= ? ON CONFLICT DO NOTHING`,
+				arch, cols, cols, ev)
+			if _, err := tx.q().ExecContext(ctx, move, b.id, b.seq, cp); err != nil {
+				return err
+			}
+			del := fmt.Sprintf(`DELETE FROM %q WHERE aggregate_id = ? AND aggregate_seq <= ? AND seq <= ?`, ev)
+			_, err := tx.q().ExecContext(ctx, del, b.id, b.seq, cp)
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("orm: Archivierung %s (%s): %w", m.name, b.id, err)
+		}
+	}
+	return nil
 }
 
 // --- Read-your-writes & Rebuild ---

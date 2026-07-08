@@ -53,7 +53,8 @@ func (d *DB) replayEvents(ctx context.Context, q queryer, m *model, tenant ID, d
 	}
 	for _, geo := range geos {
 		for {
-			query := fmt.Sprintf(`SELECT %s FROM %q WHERE geo = ? AND seq > ?`, esEventSelect(m), esEventsTable(m))
+			// Streams lesen transparent Hot + Archiv (alte Positionen).
+			query := fmt.Sprintf(`SELECT %s FROM %s WHERE geo = ? AND seq > ?`, esEventSelect(m), esEventsFrom(m, true))
 			args := []any{geo, delivered[geo]}
 			if m.tenanted() {
 				query += ` AND tenant_id = ?`

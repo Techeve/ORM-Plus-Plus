@@ -32,6 +32,7 @@ type DB struct {
 
 	schemaVersion int
 	regions       map[string]bool // deklarierte Topologie; leer = implizit "local"
+	regionDecls   []RegionDecl    // inkl. Placement — persistiert in ormpp_geo_regions
 	migrated      bool
 
 	// Migration (Phase 3):
@@ -158,7 +159,24 @@ func Region(name string, opts ...RegionOption) RegionDecl {
 func Topology(d *DB, regions ...RegionDecl) {
 	for _, r := range regions {
 		d.regions[r.name] = true
+		d.regionDecls = append(d.regionDecls, r)
 	}
+}
+
+// persistTopology schreibt die deklarierte Topologie ins Register
+// ormpp_geo_regions (additiv; Lebenszyklus bootstrapping/draining folgt
+// in Phase 5 — deklarierte Regionen sind hier sofort active).
+func (d *DB) persistTopology(ctx context.Context) error {
+	for _, r := range d.regionDecls {
+		if _, err := d.q().ExecContext(ctx, `
+			INSERT INTO ormpp_geo_regions (name, status, placement, topology_version, created_at)
+			VALUES (?, 'active', ?, 1, ?)
+			ON CONFLICT (name) DO UPDATE SET placement = excluded.placement`,
+			r.name, r.placement, nowUTC().Format(time.RFC3339Nano)); err != nil {
+			return fmt.Errorf("orm: Region %s registrieren: %w", r.name, err)
+		}
+	}
+	return nil
 }
 
 // validGeo prüft ein Daten-Geo gegen die deklarierte Topologie.
@@ -285,6 +303,9 @@ func (d *DB) Migrate(ctx context.Context, plans ...MigrationPlan) error {
 		}
 	}
 
+	if err := d.persistTopology(ctx); err != nil {
+		return err
+	}
 	if err := d.tenants.bootstrap(ctx); err != nil {
 		return err
 	}
@@ -371,6 +392,13 @@ func (d *DB) bootstrapSystemTables(ctx context.Context) error {
 			seq %s NOT NULL,
 			PRIMARY KEY (consumer, geo)
 		)`, d.dial.columnType(kInt)),
+		`CREATE TABLE IF NOT EXISTS ormpp_geo_regions (
+			name TEXT PRIMARY KEY,
+			status TEXT NOT NULL CHECK (status IN ('bootstrapping','active','draining','removed')),
+			placement TEXT NOT NULL DEFAULT '',
+			topology_version INTEGER NOT NULL DEFAULT 1,
+			created_at TEXT NOT NULL
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := d.q().ExecContext(ctx, s); err != nil {

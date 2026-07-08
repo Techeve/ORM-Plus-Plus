@@ -152,7 +152,10 @@ func (d *DB) foldInto(ctx context.Context, q queryer, m *model, agg *Aggregate, 
 		}
 	}
 
-	query := fmt.Sprintf(`SELECT aggregate_seq, occurred_at, type_id, data FROM %q WHERE aggregate_id = ? AND aggregate_seq > ?`, esEventsTable(m))
+	// Normalfall (Snapshot + Rest) liest nur den Hot-Log; Zeitreisen unter
+	// die Archiv-Grenze lesen transparent Hot + Archiv.
+	query := fmt.Sprintf(`SELECT aggregate_seq, occurred_at, type_id, data FROM %s WHERE aggregate_id = ? AND aggregate_seq > ?`,
+		esEventsFrom(m, upToSeq > 0 || upToTime != nil))
 	args := []any{agg.id.String(), agg.version}
 	if m.tenanted() {
 		query += ` AND tenant_id = ?`
@@ -281,11 +284,20 @@ func (a *Aggregate) Append(ctx context.Context, payloads ...any) (Position, erro
 		// Optimistische Prüfung: liegt die Log-Spitze über der geladenen
 		// Version, war jemand schneller. Kleiner darf sie sein (Events vor
 		// dem Snapshot archiviert); Duplikate verhindert der PK
-		// (aggregate_id, aggregate_seq).
+		// (aggregate_id, aggregate_seq). Zugleich Geo-Pinning: Das Daten-Geo
+		// klebt ab dem ersten Event am Aggregat — Folge-Appends schreiben in
+		// dessen Heimat-Partition, unabhängig vom Context-Geo.
 		var cur int64
-		if err := q.QueryRowContext(ctx,
-			fmt.Sprintf(`SELECT COALESCE(MAX(aggregate_seq), 0) FROM %q WHERE aggregate_id = ?`, ev),
-			a.id.String()).Scan(&cur); err != nil {
+		var homeGeo string
+		row := q.QueryRowContext(ctx,
+			fmt.Sprintf(`SELECT aggregate_seq, geo FROM %q WHERE aggregate_id = ? ORDER BY aggregate_seq DESC LIMIT 1`, ev),
+			a.id.String())
+		switch err := row.Scan(&cur, &homeGeo); err {
+		case nil:
+			geo = homeGeo
+		case sql.ErrNoRows:
+			cur = 0
+		default:
 			return err
 		}
 		if cur > a.version {
@@ -462,11 +474,12 @@ func (a *Aggregate) History(ctx context.Context) iter.Seq2[CloudEvent, error] {
 			return
 		}
 		// Chunkweise materialisieren: kein offener Cursor während der
-		// Konsument arbeitet (SQLite hat eine Verbindung).
+		// Konsument arbeitet (SQLite hat eine Verbindung). Historie liest
+		// transparent Hot + Archiv.
 		var after int64
 		for {
-			query := fmt.Sprintf(`SELECT %s FROM %q WHERE aggregate_id = ? AND aggregate_seq > ?`,
-				esEventSelect(m), esEventsTable(m))
+			query := fmt.Sprintf(`SELECT %s FROM %s WHERE aggregate_id = ? AND aggregate_seq > ?`,
+				esEventSelect(m), esEventsFrom(m, true))
 			args := []any{a.id.String(), after}
 			if m.tenanted() {
 				query += ` AND tenant_id = ?`

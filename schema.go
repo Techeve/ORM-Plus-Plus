@@ -53,11 +53,18 @@ func (d *DB) applySchema(ctx context.Context) error {
 	return nil
 }
 
-// ensureESTables legt Event-Log und Snapshot-Tabelle eines ES-Models an.
+// ensureESTables legt Event-Log (partitioniert, wo nativ), Archiv- und
+// Snapshot-Tabelle eines ES-Models an. Neue Regionen ergänzen ihre
+// Partition additiv bei jedem Migrate.
 func (d *DB) ensureESTables(ctx context.Context, m *model) error {
+	regions := make([]string, 0, len(d.regions))
+	for r := range d.regions {
+		regions = append(regions, r)
+	}
 	for table, stmts := range map[string][]string{
-		esEventsTable(m): esEventsSQL(d.dial, m),
-		esSnapsTable(m):  esSnapshotsSQL(d.dial, m),
+		esEventsTable(m):  esEventsSQL(d.dial, m, regions),
+		esArchiveTable(m): esArchiveSQL(d.dial, m),
+		esSnapsTable(m):   esSnapshotsSQL(d.dial, m),
 	} {
 		existing, err := d.dial.tableColumns(d.q(), table)
 		if err != nil {
@@ -70,6 +77,12 @@ func (d *DB) ensureESTables(ctx context.Context, m *model) error {
 			if _, err := d.q().ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("orm: %s anlegen: %w (%s)", table, err, stmt)
 			}
+		}
+	}
+	// Partitionen für neu deklarierte Regionen (idempotent, additiv).
+	for _, stmt := range d.dial.partitionSQL(esEventsTable(m), regions) {
+		if _, err := d.q().ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("orm: Partition anlegen: %w (%s)", err, stmt)
 		}
 	}
 	return nil
@@ -151,9 +164,43 @@ func esColumnDDL(dial dialect, f *field) string {
 	return fmt.Sprintf("%q %s", f.column, dial.columnType(colKindOf(f)))
 }
 
-// esEventsSQL erzeugt den Append-only-Event-Log eines ES-Models.
-func esEventsSQL(dial dialect, m *model) []string {
+// esEventsSQL erzeugt den Append-only-Event-Log eines ES-Models. Auf
+// PG/YB nativ PARTITION BY LIST (geo) — der PK muss dort den Partition-Key
+// enthalten; die globale Eindeutigkeit von (aggregate_id, aggregate_seq)
+// sichert das Aggregat-Geo-Pinning (ein Aggregat lebt in genau einer Region).
+func esEventsSQL(dial dialect, m *model, regions []string) []string {
 	t := esEventsTable(m)
+	intT := dial.columnType(kInt)
+	tenantCol := ""
+	if m.tenanted() {
+		tenantCol = "\n  \"tenant_id\" TEXT NOT NULL,"
+	}
+	pk := `"aggregate_id", "aggregate_seq"`
+	part := dial.partitionClause()
+	if part != "" {
+		pk += `, "geo"`
+	}
+	stmts := []string{fmt.Sprintf(`CREATE TABLE %q (
+  "aggregate_id" TEXT NOT NULL,
+  "aggregate_seq" %s NOT NULL,%s
+  "geo" TEXT NOT NULL,
+  "seq" %s NOT NULL,
+  "event_id" TEXT NOT NULL,
+  "occurred_at" TEXT NOT NULL,
+  "type_id" %s NOT NULL,
+  "data" TEXT NOT NULL,
+  PRIMARY KEY (%s)
+)%s`, t, intT, tenantCol, intT, intT, pk, part)}
+	stmts = append(stmts, dial.partitionSQL(t, regions)...)
+	return append(stmts,
+		fmt.Sprintf("CREATE UNIQUE INDEX %q ON %q (%s)", "ux_"+t+"_geo_seq", t, quoteAll("geo", "seq")))
+}
+
+// esArchiveSQL erzeugt die Archiv-Nebentabelle: gleiche Spalten wie der
+// Hot-Log, unpartitioniert, SQL-abfragbar (Reads laufen transparent als
+// UNION über Hot + Archiv).
+func esArchiveSQL(dial dialect, m *model) []string {
+	t := esArchiveTable(m)
 	intT := dial.columnType(kInt)
 	tenantCol := ""
 	if m.tenanted() {
@@ -171,7 +218,7 @@ func esEventsSQL(dial dialect, m *model) []string {
   "data" TEXT NOT NULL,
   PRIMARY KEY ("aggregate_id", "aggregate_seq")
 )`, t, intT, tenantCol, intT, intT),
-		fmt.Sprintf("CREATE UNIQUE INDEX %q ON %q (%s)", "ux_"+t+"_geo_seq", t, quoteAll("geo", "seq")),
+		fmt.Sprintf("CREATE INDEX %q ON %q (%s)", "ix_"+t+"_geo_seq", t, quoteAll("geo", "seq")),
 	}
 }
 

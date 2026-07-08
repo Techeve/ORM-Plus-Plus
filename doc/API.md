@@ -538,6 +538,7 @@ pos, err = zone.Append(ctx, RecordAdded{Record: rec})
 ```
 
 - `Append` hängt ein oder mehrere Events **atomar** an (ein Aufruf = eine Transaktion) und erwartet implizit die geladene Aggregat-Version — ist inzwischen jemand dazwischengekommen: `orm.ErrVersionConflict`. Dann: `Refresh` + Entscheidung + erneut anhängen.
+- **Geo-Pinning:** Das Daten-Geo klebt ab dem ersten Event am Aggregat. `WithGeo` bestimmt die Heimatregion bei der **Entstehung**; Folge-Appends schreiben immer in die Heimat-Partition, unabhängig vom Context-Geo. Umzug ist eine explizite Operation (`SetGeo`, GeoFlexible).
 - Rückgabe `pos orm.Position` ist die Event-Position (Konsistenz-Token für `WaitFor`).
 - „Löschen" ist ein Event (`ZoneDeleted{}`) — die Historie bleibt. Physisches Löschen (z. B. DSGVO) ist eine explizite Verwaltungsoperation (Stufe 2).
 - Jedes `Append` löst automatisch die Trigger-Kette aus: eingebaute Projektion → `OnEvent`-Reaktoren → `Watch`-Streams.
@@ -653,6 +654,8 @@ func (z *DNSZone) SnapshotMarshal() ([]byte, error)
 func (z *DNSZone) SnapshotUnmarshal(b []byte) error
 ```
 
+**Archivierung:** Events unterhalb des zweitjüngsten Snapshots wandern automatisch in Archiv-Tabellen (Worker, lease-koordiniert, nie über den Projektionsstand hinaus). Für die API ist das unsichtbar: `Load` faltet Snapshot + Hot-Log; `History`, `AtVersion`/`AtTime`, `Stream` und Rebuilds lesen transparent Hot **und** Archiv.
+
 ---
 
 ## 8. Schema-Versionen & Migration
@@ -714,7 +717,7 @@ Vorbedingung (von ORM++ geprüft): keine lebende Instanz mit älterer Schema-Ver
 err := db.StartWorkers(ctx)
 ```
 
-Startet die Hintergrund-Verarbeitung dieser Instanz: Projektionen, `OnEvent`-Reaktoren, Snapshot- und Archiv-Worker, Geo-Replikation, ggf. Migrations-Shards. Koordination über **Leases mit Fencing** in der DB — pro Projektion/Partition arbeitet clusterweit genau eine Instanz; fällt sie aus (Heartbeat-TTL), übernimmt eine andere **derselben Region**. `ctx`-Abbruch oder `db.Close()` stoppt die Worker sauber.
+Startet die Hintergrund-Verarbeitung dieser Instanz: Projektionen, `OnEvent`-Reaktoren, Snapshot- und Archiv-Worker, ggf. Migrations-Shards. Koordination über **Leases mit Fencing** in der DB — pro Aufgabe (Projektion je Model, View, Dual-Write-Nachlauf) arbeitet clusterweit genau eine Instanz, sticky; fällt sie aus (Lease-TTL bzw. `Close`), übernimmt eine andere. `ctx`-Abbruch oder `db.Close()` stoppt die Worker sauber.
 
 ### 9.2 Deployment-Muster
 

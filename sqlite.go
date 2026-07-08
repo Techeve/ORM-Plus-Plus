@@ -67,6 +67,12 @@ func (sqliteDialect) limitAll() string { return "-1" }
 // (txlock=immediate) — verhaltensgleich, kein Suffix nötig.
 func (sqliteDialect) forUpdate() string { return "" }
 
+// SQLite kollabiert alle Regionen physisch: keine Partitionierung,
+// die Geo-Spalte trägt weiter das deklarierte Daten-Geo.
+func (sqliteDialect) partitionClause() string { return "" }
+
+func (sqliteDialect) partitionSQL(table string, regions []string) []string { return nil }
+
 func (sqliteDialect) dualWriteTriggerSQL(table, pk string) []string {
 	now := `strftime('%Y-%m-%dT%H:%M:%fZ','now')`
 	return []string{

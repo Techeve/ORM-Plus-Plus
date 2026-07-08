@@ -5,7 +5,29 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 
 ## Aktueller Schritt
 
-**Phase 4 (Kern) abgeschlossen**: PostgreSQL- und YugabyteDB-Adapter (pgx), identische Verhaltenssuite läuft gegen alle drei Backends (lokal via docker-compose, in CI als Services). Offen aus Phase 4: native Partitionierung der Event-Tabellen und Archivierung (siehe Notizen). Nächster Schritt: Phase 4b (Partitionierung/Archivierung) oder Phase 5 — v1.0-Härtung.
+**Phase 4 + 4b abgeschlossen**: PostgreSQL-/YugabyteDB-Adapter, native Geo-Partitionierung der Event-Tabellen, Archivierung mit transparenten Union-Reads, Worker-Leases, Topologie-Register — identische Verhaltenssuite grün auf allen drei Backends. Nächster Schritt: Phase 5 — v1.0-Härtung (Encryption, Export/Purge, MigrationStatus/Health, Standalone-Worker-Muster, Lasttests).
+
+## Phase-4b-Arbeitsplan (Reihenfolge)
+
+| # | Schritt | Status |
+|---|---|---|
+| 4b.1 | Native `PARTITION BY LIST (geo)` der Event-Tabellen auf PG/YB: Partition je deklarierter Region + DEFAULT-Partition, additiv bei neuen Regionen; PK enthält dort `geo` (Partitionierungs-Anforderung); SQLite kollabiert unverändert | ✅ |
+| 4b.2 | Aggregat-Geo-Pinning: Daten-Geo klebt ab dem ersten Event am Aggregat — Folge-Appends schreiben in die Heimat-Partition, unabhängig vom Context-Geo | ✅ |
+| 4b.3 | Archivierung: `<t>_events_archive`-Nebentabelle, Archiv-Worker (Grenze: zweitjüngster Snapshot UND Projektions-Checkpoint, batchweise, idempotent) | ✅ |
+| 4b.4 | Transparente Union-Reads (Hot + Archiv) für History, AtVersion/AtTime unterhalb der Snapshots, Stream/Watch-Replay, Reaktoren/RebuildView, eventGeos | ✅ |
+| 4b.5 | Worker-Leases: Projektion+Snapshot+Archiv je Model, je View, Dual-Write-Drain — clusterweit eine Instanz, sticky, TTL-Failover, sofortige Freigabe bei Close | ✅ |
+| 4b.6 | `ormpp_geo_regions`: Topologie-Register (Name, Status, Placement) bei Migrate persistiert | ✅ |
+| 4b.7 | Verhaltenstests: Archiv-Transparenz, Geo-Pinning, Lease-Koordination (backend-neutral) | ✅ |
+
+## Phase-4b-Notizen (Entscheidungen & bewusste Grenzen)
+
+- **Schema-Änderung (dokumentiert wie abgesprochen):** Auf PG/YB ist der Event-PK `(aggregate_id, aggregate_seq, geo)` — Partitionstabellen verlangen den Partition-Key im PK. Die globale Eindeutigkeit von `(aggregate_id, aggregate_seq)` sichert das Geo-Pinning (ein Aggregat lebt in genau einer Region); der theoretische Rest-Fall — zwei Prozesse erzeugen zeitgleich dasselbe frische Aggregat mit unterschiedlichem Geo — ist über Partitionsgrenzen nicht constraint-durchsetzbar (bekannte Partitionierungs-Grenze, ROADMAP-Risiko notiert).
+- **API-Verhalten präzisiert (API.md §7.2):** `WithGeo` bestimmt die Heimatregion bei der Entstehung; danach klebt sie am Aggregat.
+- **Archiv als Nebentabelle auf allen Backends** (verhaltensgleich, SQL-abfragbar). Die ROADMAP-Optimierung „Seq-Range-Partition abhängen statt kopieren" (PG/YB) setzt Sub-Partitionierung RANGE(seq) voraus — als spätere Optimierung notiert, Semantik ändert sich dadurch nicht.
+- **Archiv-Grenze doppelt gesichert:** nur Events ≤ zweitjüngster Snapshot UND ≤ Projektions-Checkpoint des jeweiligen Geos. Read-Model und Normal-Load lesen dadurch nie ins Archiv; Reaktoren/Rebuilds/Zeitreisen lesen Union.
+- **Worker-Leases sticky:** Halter erneuert pro Durchlauf (TTL 15 s); `Close` löscht die Leases der Instanz ⇒ sofortiger Failover. Regionale Zuordnung der Leases („Worker derselben Region") folgt mit der Geo-Replikation (Phase 5/Stufe 2).
+- **YugabyteDB Smart Driver bewusst nicht verwendet:** `github.com/yugabyte/pgx` (Fork) bringt Cluster-aware Connection-Load-Balancing (`load_balance`, `topology_keys`), keine schnellere Query-Ausführung. Für v1 reicht jackc/pgx + Multi-Host-DSN/LB; der Fork hinkt Upstream hinterher. Da `orm.Yugabyte` den Treiber kapselt, ist ein späterer Wechsel ein interner Drop-in ohne API-Änderung. Entscheidung dokumentiert, Re-Evaluation bei Multi-Node-Betrieb (Phase 5/Stufe 2).
+- **`ormpp_geo_regions`-Lebenszyklus** (bootstrapping → active → draining → removed) ist angelegt, aber noch ohne Zustandsmaschine — deklarierte Regionen sind sofort `active`; Nachreplikation/Draining kommt mit GeoGlobal/GeoFlexible (Phase 5/Stufe 2).
 
 ## Phase-4-Arbeitsplan (Reihenfolge)
 

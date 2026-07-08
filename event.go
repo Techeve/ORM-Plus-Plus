@@ -125,8 +125,21 @@ func (es *esInfo) parseType(full string) (name string, v int, ok bool) {
 	return rest[:i], n, true
 }
 
-func esEventsTable(m *model) string { return m.table + "_events" }
-func esSnapsTable(m *model) string  { return m.table + "_snapshots" }
+func esEventsTable(m *model) string  { return m.table + "_events" }
+func esSnapsTable(m *model) string   { return m.table + "_snapshots" }
+func esArchiveTable(m *model) string { return m.table + "_events_archive" }
+
+// esEventsFrom liefert die FROM-Quelle für Event-Reads: nur der Hot-Log
+// (Normalfall — Events nach dem letzten Snapshot liegen immer dort) oder
+// transparent Hot + Archiv (Historie, Zeitreisen, Rebuilds, Streams).
+func esEventsFrom(m *model, includeArchive bool) string {
+	if !includeArchive {
+		return fmt.Sprintf("%q", esEventsTable(m))
+	}
+	cols := esEventSelect(m)
+	return fmt.Sprintf(`(SELECT %s FROM %q UNION ALL SELECT %s FROM %q) AS ev`,
+		cols, esEventsTable(m), cols, esArchiveTable(m))
+}
 
 // --- Typ-Wörterbuch (ormpp_event_types) ---
 

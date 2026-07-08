@@ -568,3 +568,159 @@ func TestAppendInTransaction(t *testing.T) {
 		t.Fatalf("Rollback hat Events hinterlassen: %d", n)
 	}
 }
+
+// --- Phase 4b: Archivierung, Geo-Pinning, Worker-Leases ---
+
+func TestArchiverMovesOldEventsTransparently(t *testing.T) {
+	db, ctx := esTestDB(t, ticketEvents(), SnapshotEvery(6), SnapshotKeepLast(2))
+	bg := context.Background()
+
+	tk := New[Ticket](db)
+	if _, err := tk.Append(ctx, TicketOpened{Title: "Archiv"}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	for i := 0; i < 11; i++ {
+		if _, err := tk.Append(ctx, NoteAdded{Note: fmt.Sprintf("n%d", i)}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+		// Snapshots entstehen bei 6 und 12 (SnapshotEvery(6)).
+		if err := db.maybeSnapshot(bg, db.reg.byName["Ticket"]); err != nil {
+			t.Fatalf("maybeSnapshot: %v", err)
+		}
+	}
+	m := db.reg.byName["Ticket"]
+	// Projektion vorziehen (Archiv-Grenze ist auch der Projektions-Checkpoint).
+	if err := db.processProjection(bg, m); err != nil {
+		t.Fatalf("processProjection: %v", err)
+	}
+	if err := db.maybeArchive(bg, m); err != nil {
+		t.Fatalf("maybeArchive: %v", err)
+	}
+
+	var hot, archived int
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM ticket_events`).Scan(&hot); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM ticket_events_archive`).Scan(&archived); err != nil {
+		t.Fatal(err)
+	}
+	if archived != 6 || hot != 6 {
+		t.Fatalf("Archivierung: hot=%d archiv=%d, erwartet 6/6 (Grenze = zweitjüngster Snapshot)", hot, archived)
+	}
+
+	// Normalpfad bleibt korrekt (Snapshot + Hot).
+	loaded, err := Load[Ticket](ctx, db, tk.ID())
+	if err != nil || loaded.Version() != 12 || len(loaded.Notes) != 11 {
+		t.Fatalf("Load nach Archivierung: v=%d notes=%d (%v)", loaded.Version(), len(loaded.Notes), err)
+	}
+	// Historie liest transparent Hot + Archiv.
+	n := 0
+	for _, err := range tk.History(ctx) {
+		if err != nil {
+			t.Fatalf("History: %v", err)
+		}
+		n++
+	}
+	if n != 12 {
+		t.Fatalf("History über Hot+Archiv: %d Events, erwartet 12", n)
+	}
+	// Zeitreise unter die Archiv-Grenze (kein Snapshot ≤ 3 mehr — faltet
+	// von null durch die archivierten Events).
+	old, err := tk.AtVersion(ctx, 3)
+	if err != nil {
+		t.Fatalf("AtVersion(3): %v", err)
+	}
+	if v3 := old.(*Ticket); len(v3.Notes) != 2 || v3.Title != "Archiv" {
+		t.Fatalf("AtVersion(3) über Archiv: %+v", v3)
+	}
+	// Stream liefert weiter alle Events.
+	total := 0
+	for _, err := range Stream[Ticket](ctx, db) {
+		if err != nil {
+			t.Fatalf("Stream: %v", err)
+		}
+		total++
+	}
+	if total != 12 {
+		t.Fatalf("Stream über Hot+Archiv: %d, erwartet 12", total)
+	}
+}
+
+func TestAggregateGeoPinning(t *testing.T) {
+	db, err := Open(newTestStore(t)())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	Register[Ticket](db, EventSourced(), ticketEvents())
+	Topology(db, Region("eu-central"), Region("us-east"))
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	base := WithTenant(context.Background(), SingleTenant)
+
+	// Aggregat entsteht in eu-central …
+	eu := WithGeo(base, "eu-central")
+	tk := New[Ticket](db)
+	if _, err := tk.Append(eu, TicketOpened{Title: "Pin"}); err != nil {
+		t.Fatalf("Append eu: %v", err)
+	}
+	// … Folge-Append mit US-Context bleibt trotzdem in der Heimatregion.
+	us := WithGeo(base, "us-east")
+	if _, err := tk.Append(us, NoteAdded{Note: "aus US-Context"}); err != nil {
+		t.Fatalf("Append us: %v", err)
+	}
+	var inUS, inEU int
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM ticket_events WHERE geo = 'us-east'`).Scan(&inUS); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM ticket_events WHERE geo = 'eu-central'`).Scan(&inEU); err != nil {
+		t.Fatal(err)
+	}
+	if inUS != 0 || inEU != 2 {
+		t.Fatalf("Geo-Pinning verletzt: eu=%d us=%d, erwartet 2/0", inEU, inUS)
+	}
+}
+
+func TestWorkerLeaseCoordination(t *testing.T) {
+	store := newTestStore(t)
+	bg := context.Background()
+	open := func() *DB {
+		db, err := Open(store())
+		if err != nil {
+			t.Fatal(err)
+		}
+		Register[Ticket](db, EventSourced(), ticketEvents())
+		if err := db.Migrate(bg); err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+	db1 := open()
+	t.Cleanup(func() { db1.Close() })
+	db2 := open()
+	t.Cleanup(func() { db2.Close() })
+
+	ctx := WithTenant(bg, SingleTenant)
+	tk := New[Ticket](db1)
+	if _, err := tk.Append(ctx, TicketOpened{Title: "Lease"}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// Instanz 1 hält die Aufgaben-Lease — Instanz 2 überspringt die Projektion.
+	if ok, err := db1.acquireLease(bg, "worker:es:ticket", time.Hour); err != nil || !ok {
+		t.Fatalf("acquireLease: %v/%v", ok, err)
+	}
+	db2.processOnce(bg)
+	cp, err := getCheckpoint(bg, db2.q(), "projection:ticket", "local")
+	if err != nil || cp != 0 {
+		t.Fatalf("Instanz 2 hat trotz fremder Lease projiziert: cp=%d (%v)", cp, err)
+	}
+	// Lease frei ⇒ Instanz 2 übernimmt.
+	db1.releaseLease(bg, "worker:es:ticket")
+	db2.processOnce(bg)
+	cp, err = getCheckpoint(bg, db2.q(), "projection:ticket", "local")
+	if err != nil || cp != 1 {
+		t.Fatalf("Übernahme nach Freigabe fehlgeschlagen: cp=%d (%v)", cp, err)
+	}
+}

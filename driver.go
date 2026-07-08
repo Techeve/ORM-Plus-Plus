@@ -44,6 +44,12 @@ type dialect interface {
 	forUpdate() string
 	// dualWriteTriggerSQL erzeugt die Nachlauf-Trigger auf einer Alt-Tabelle.
 	dualWriteTriggerSQL(table, pk string) []string
+	// partitionClause ist die PARTITION-BY-Klausel der Event-Tabellen
+	// ("" = Backend partitioniert nicht; SQLite kollabiert).
+	partitionClause() string
+	// partitionSQL erzeugt die Partitionen einer Event-Tabelle: eine je
+	// Region plus eine DEFAULT-Partition (idempotent).
+	partitionSQL(table string, regions []string) []string
 }
 
 type queryer interface {
