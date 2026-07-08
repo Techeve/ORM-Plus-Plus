@@ -75,7 +75,9 @@ DB-Details.
 | `migrator.go` | Zustandsmaschine idle→expanding→backfill→dual-write→finalizing, Backfill (checkpointed/drosselbar), Dual-Write-Trigger + Queue-Drain, `FinalizeMigration`, deprecated-Verwaltung |
 | `instances.go` | Instanzregister (`ormpp_instances`, Heartbeat/TTL) + Leases mit Fencing (`ormpp_leases`) |
 
-Tests: `crud_test.go` (Phase 1), `es_test.go` (Phase 2), `migration_test.go` (Phase 3) — laufen **unverändert** gegen alle drei Backends. Backend-Wahl über `ORMPP_TEST_BACKEND` (sqlite|postgres|yugabyte) + `ORMPP_TEST_DSN` (`backend_test.go`: Schema-pro-Test-Isolation). Lokal: `docker compose up -d` (PG auf 5433, YB-YSQL auf 5434), siehe README.
+Tests: `crud_test.go` (Phase 1), `es_test.go` (Phase 2), `migration_test.go` (Phase 3), `crypto_test.go`/`observe_test.go` (Phase 5) — laufen **unverändert** gegen alle drei Backends. Backend-Wahl über `ORMPP_TEST_BACKEND` (sqlite|postgres|yugabyte) + `ORMPP_TEST_DSN` (`backend_test.go`: Schema-pro-Test-Isolation). Lokal: `docker compose up -d` (PG auf 5433, YB-YSQL auf 5434), siehe README.
+
+**Beispielanwendung:** `examples/demo` (`go run ./examples/demo`) — durchkommentierte Tour über alle Fähigkeiten in zwei App-Generationen; bei API-Änderungen mitpflegen (sie kompiliert in CI mit).
 
 ### Bewusste Grenzen (keine API-Stubs mehr — alles Deklarierte funktioniert)
 

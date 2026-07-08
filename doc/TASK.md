@@ -27,7 +27,7 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 
 - Lizenzentscheidung (permissiv angedacht) — Entscheidung des Betreibers.
 - Lasttests (Append-Durchsatz, Projektions-Lag, Backfill unter Last) und Fehlerinjektion (Worker-Ausfall mitten in Migration/Projektion).
-- Beispielprojekt (Mini-DNS-Muster: ES-Kern + CRUD-Rest) — kann als eigenes Repo entstehen.
+- ~~Beispielprojekt~~ ✅ `examples/demo` (Mini-DNS-Muster, zwei App-Generationen, jede Fähigkeit einmal, durchkommentiert; `go run ./examples/demo`).
 - Release: Git-Tag `v1.0.0` → CI erzeugt Changelog + GitLab-Release.
 
 ## Phase-4b-Arbeitsplan (Reihenfolge)
