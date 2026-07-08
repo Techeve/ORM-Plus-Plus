@@ -277,6 +277,21 @@ func compileES(m *model, t reflect.Type, decls []EventDecl) error {
 		es.byType[d.payload] = dd
 	}
 	m.es = es
+
+	// Append-Statements einmalig bauen. Spitze + Geo-Sequenz kombiniert:
+	// der Normalfall (bestehendes Aggregat) braucht dann nur EINE Abfrage
+	// vor dem Insert statt zwei.
+	ev := m.table + "_events" // esEventsTable ist hier noch nicht nutzbar (Zyklus vermeiden)
+	es.sqlTopAndSeq = fmt.Sprintf(`SELECT a.cur, a.geo,
+		COALESCE((SELECT MAX(e.seq) FROM %q e WHERE e.geo = a.geo), 0)
+		FROM (SELECT aggregate_seq AS cur, geo FROM %q WHERE aggregate_id = ?
+		      ORDER BY aggregate_seq DESC LIMIT 1) a`, ev, ev)
+	es.sqlGeoSeq = fmt.Sprintf(`SELECT COALESCE(MAX(seq), 0) FROM %q WHERE geo = ?`, ev)
+	insCols := []string{"aggregate_id", "aggregate_seq", "geo", "seq", "event_id", "occurred_at", "type_id", "data"}
+	if m.tenanted() {
+		insCols = append(insCols, "tenant_id")
+	}
+	es.sqlInsert = insertSQL(ev, insCols)
 	return nil
 }
 

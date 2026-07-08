@@ -103,6 +103,11 @@ type esInfo struct {
 	byType map[reflect.Type]*eventDecl
 	byName map[string]*eventDecl
 	prefix string // CloudEvents-Typ-Präfix, gesetzt bei Migrate
+
+	// Vorgebaute Append-Statements (compileES) — Hot Path ohne Sprintf.
+	sqlTopAndSeq string // Log-Spitze + Geo-Sequenz in EINEM Statement
+	sqlGeoSeq    string // Geo-Sequenz allein (erstes Event eines Aggregats)
+	sqlInsert    string // Event-Insert (Spaltenreihenfolge fix)
 }
 
 func (es *esInfo) fullType(name string, v int) string {

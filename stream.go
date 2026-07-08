@@ -28,6 +28,19 @@ func (d *DB) unsubscribe(w *watcher) {
 	d.watchMu.Unlock()
 }
 
+// hasWatchers meldet, ob jemand auf dieses Model hört (Append spart sich
+// sonst den CloudEvent-Envelope-Bau).
+func (d *DB) hasWatchers(m *model) bool {
+	d.watchMu.Lock()
+	defer d.watchMu.Unlock()
+	for w := range d.watchers {
+		if w.m == m {
+			return true
+		}
+	}
+	return false
+}
+
 // publish verteilt ein committetes Event an alle Watcher des Models.
 // Flüchtig: volle Empfänger verlieren Events (Verlässlichkeit kommt aus OnEvent).
 func (d *DB) publish(m *model, ce CloudEvent) {

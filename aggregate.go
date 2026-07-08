@@ -281,38 +281,31 @@ func (a *Aggregate) Append(ctx context.Context, payloads ...any) (Position, erro
 	var lastSeq int64
 
 	write := func(q queryer) error {
-		// Optimistische Prüfung: liegt die Log-Spitze über der geladenen
-		// Version, war jemand schneller. Kleiner darf sie sein (Events vor
-		// dem Snapshot archiviert); Duplikate verhindert der PK
-		// (aggregate_id, aggregate_seq). Zugleich Geo-Pinning: Das Daten-Geo
-		// klebt ab dem ersten Event am Aggregat — Folge-Appends schreiben in
-		// dessen Heimat-Partition, unabhängig vom Context-Geo.
-		var cur int64
+		// Fastpath: Log-Spitze (Version + Heimat-Geo) UND Geo-Sequenz in
+		// EINEM Statement — der Normalfall (bestehendes Aggregat) macht vor
+		// den Inserts nur noch eine Abfrage. Optimistische Prüfung: liegt
+		// die Spitze über der geladenen Version, war jemand schneller
+		// (kleiner darf sie sein — Events vor dem Snapshot archiviert;
+		// Duplikate verhindert der PK). Geo-Pinning: das Daten-Geo klebt ab
+		// dem ersten Event am Aggregat, unabhängig vom Context-Geo.
+		var cur, geoSeq int64
 		var homeGeo string
-		row := q.QueryRowContext(ctx,
-			fmt.Sprintf(`SELECT aggregate_seq, geo FROM %q WHERE aggregate_id = ? ORDER BY aggregate_seq DESC LIMIT 1`, ev),
-			a.id.String())
-		switch err := row.Scan(&cur, &homeGeo); err {
+		row := q.QueryRowContext(ctx, m.es.sqlTopAndSeq, a.id.String())
+		switch err := row.Scan(&cur, &homeGeo, &geoSeq); err {
 		case nil:
 			geo = homeGeo
 		case sql.ErrNoRows:
+			// Neues Aggregat: Geo-Sequenz für das Context-Geo holen.
 			cur = 0
+			if err := q.QueryRowContext(ctx, m.es.sqlGeoSeq, geo).Scan(&geoSeq); err != nil {
+				return err
+			}
 		default:
 			return err
 		}
 		if cur > a.version {
 			return ErrVersionConflict
 		}
-		var geoSeq int64
-		if err := q.QueryRowContext(ctx,
-			fmt.Sprintf(`SELECT COALESCE(MAX(seq), 0) FROM %q WHERE geo = ?`, ev), geo).Scan(&geoSeq); err != nil {
-			return err
-		}
-		cols := []string{"aggregate_id", "aggregate_seq", "geo", "seq", "event_id", "occurred_at", "type_id", "data"}
-		if m.tenanted() {
-			cols = append(cols, "tenant_id")
-		}
-		ins := insertSQL(ev, cols)
 		for i, st := range sts {
 			full := m.es.fullType(st.decl.name, st.decl.version)
 			typeID, ok := d.esTypes.idOf(full)
@@ -324,7 +317,7 @@ func (a *Aggregate) Append(ctx context.Context, payloads ...any) (Position, erro
 			if m.tenanted() {
 				args = append(args, tenant.String())
 			}
-			if _, err := q.ExecContext(ctx, ins, args...); err != nil {
+			if _, err := q.ExecContext(ctx, m.es.sqlInsert, args...); err != nil {
 				return err
 			}
 		}
@@ -365,9 +358,13 @@ func (a *Aggregate) Append(ctx context.Context, payloads ...any) (Position, erro
 	a.version += int64(len(sts))
 	a.updatedAt = now
 
-	// Trigger-Kette: Watcher benachrichtigen, Worker wecken.
+	// Trigger-Kette: Watcher benachrichtigen (nur wenn jemand zuhört —
+	// der Envelope-Bau lohnt sonst nicht), Worker wecken.
 	base := lastSeq - int64(len(sts))
 	for i, st := range sts {
+		if !d.hasWatchers(m) {
+			break
+		}
 		d.publish(m, CloudEvent{
 			SpecVersion:     "1.0",
 			ID:              st.eventID,
