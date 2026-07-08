@@ -74,12 +74,24 @@ func (d *DB) workerLoop(ctx context.Context) {
 // workerLeaseTTL: Aufgaben-Leases der Worker; Failover nach Ablauf.
 const workerLeaseTTL = 15 * time.Second
 
-// tryLease nimmt/erneuert eine Worker-Lease (sticky: der Halter erneuert bei
-// jedem Durchlauf; stirbt er, übernimmt eine andere Instanz nach TTL —
-// Close gibt Leases sofort frei).
+// tryLease nimmt/erneuert eine Worker-Lease. Der Halter merkt sich die
+// Gültigkeit im Speicher und erneuert erst nach TTL/2 — eine Lease-
+// Erneuerung ist eine SCHREIB-Transaktion und darf nicht bei jedem
+// Worker-Durchlauf mit den Appends um den Schreiber konkurrieren.
+// Failover unverändert: stirbt der Halter, übernimmt eine andere Instanz
+// nach TTL-Ablauf; Close gibt Leases sofort frei. (leaseUntil wird nur
+// vom Worker-Goroutine berührt.)
 func (d *DB) tryLease(ctx context.Context, name string) bool {
+	if until, ok := d.leaseUntil[name]; ok && time.Now().Before(until) {
+		return true
+	}
 	ok, err := d.acquireLease(ctx, name, workerLeaseTTL)
-	return err == nil && ok
+	if err != nil || !ok {
+		delete(d.leaseUntil, name)
+		return false
+	}
+	d.leaseUntil[name] = time.Now().Add(workerLeaseTTL / 2)
+	return true
 }
 
 // processOnce fährt einen Verarbeitungsdurchlauf: Heartbeat, Projektionen,

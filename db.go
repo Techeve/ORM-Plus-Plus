@@ -43,6 +43,7 @@ type DB struct {
 	dwMu          sync.Mutex
 	activeReplace map[string]*compiledReplace // Alt-Tabelle → Schritt (Dual-Write-Drain)
 	lastBeat      time.Time                   // nur vom Worker-Goroutine benutzt
+	leaseUntil    map[string]time.Time        // Lease-Gültigkeit im Speicher (nur Worker-Goroutine)
 
 	// Event Sourcing (Phase 2):
 	esTypes   *typeDict                   // Typ-Wörterbuch, geladen bei Migrate
@@ -129,6 +130,7 @@ func Open(driver Driver, opts ...OpenOption) (*DB, error) {
 		instanceID:    NewID(),
 		hostname:      host,
 		migrations:    map[int][]MigrationStep{},
+		leaseUntil:    map[string]time.Time{},
 	}
 	d.tenants = newTenantRegistry(d)
 	return d, nil
