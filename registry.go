@@ -238,7 +238,7 @@ func parseField(sf reflect.StructField, tag string) (*field, error) {
 					return nil, fmt.Errorf("unbekanntes ondelete %q", val)
 				}
 			case "encrypted":
-				return nil, fmt.Errorf("encrypted ist noch nicht implementiert (siehe TASK.md)")
+				return nil, fmt.Errorf("encrypted ist noch nicht implementiert (siehe doc/TASK.md)")
 			default:
 				return nil, fmt.Errorf("unbekanntes Tag %q", key)
 			}
@@ -348,7 +348,7 @@ func (r *registry) sortedByDeps() ([]*model, error) {
 }
 
 // checksum liefert einen stabilen Hash über alle Modell-Deklarationen
-// (Drift-Erkennung laut ROADMAP.md).
+// (Drift-Erkennung laut doc/ROADMAP.md).
 func (r *registry) checksum() string {
 	var lines []string
 	for _, m := range r.ordered {

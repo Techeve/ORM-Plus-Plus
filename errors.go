@@ -2,7 +2,7 @@ package orm
 
 import "errors"
 
-// Sentinel-Fehler laut API.md, Abschnitt 11. Alle mit errors.Is prüfbar.
+// Sentinel-Fehler laut doc/API.md, Abschnitt 11. Alle mit errors.Is prüfbar.
 var (
 	ErrNotFound          = errors.New("orm: nicht gefunden")
 	ErrNoTenant          = errors.New("orm: kein Tenant im Context (fail-closed)")

@@ -357,7 +357,7 @@ func (r *repo[T]) Delete(ctx context.Context, id ID) error {
 }
 
 func (r *repo[T]) SetGeo(ctx context.Context, id ID, home string, opts ...GeoOption) error {
-	return fmt.Errorf("orm: SetGeo ist noch nicht implementiert (GeoFlexible-Mechanik, siehe TASK.md)")
+	return fmt.Errorf("orm: SetGeo ist noch nicht implementiert (GeoFlexible-Mechanik, siehe doc/TASK.md)")
 }
 
 func (r *repo[T]) Query(ctx context.Context) QueryBuilder[T] {

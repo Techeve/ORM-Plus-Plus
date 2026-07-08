@@ -204,7 +204,7 @@ func (d *DB) Migrate(ctx context.Context) error {
 	}
 	for _, m := range d.reg.ordered {
 		if m.kind == kindEventSourced {
-			return fmt.Errorf("orm: %s: EventSourced-Modelle sind noch nicht implementiert (Phase 2, siehe TASK.md)", m.name)
+			return fmt.Errorf("orm: %s: EventSourced-Modelle sind noch nicht implementiert (Phase 2, siehe doc/TASK.md)", m.name)
 		}
 	}
 

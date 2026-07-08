@@ -4,7 +4,7 @@
 //
 // Die konsumierende Anwendung deklariert Modelle und arbeitet mit Commands,
 // Events und Query-Schnittstellen — sie schreibt kein SQL und kennt keine
-// Datenbank-Details. Siehe ROADMAP.md für den Entwicklungsplan.
+// Datenbank-Details. Siehe doc/ROADMAP.md für den Entwicklungsplan.
 package orm
 
 // Version ist die aktuelle Modulversion. Sie wird bei Releases über

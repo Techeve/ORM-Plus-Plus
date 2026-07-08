@@ -141,7 +141,7 @@ func (t *TenantRegistry) Archive(ctx context.Context, id ID) error {
 
 // Export schreibt den vollständigen Datenauszug eines Tenants (Phase 5).
 func (t *TenantRegistry) Export(ctx context.Context, id ID, w io.Writer) error {
-	return fmt.Errorf("orm: Tenants().Export ist noch nicht implementiert (siehe TASK.md)")
+	return fmt.Errorf("orm: Tenants().Export ist noch nicht implementiert (siehe doc/TASK.md)")
 }
 
 // Purge löscht alle Daten eines archivierten Tenants physisch (Phase 5).
@@ -153,7 +153,7 @@ func (t *TenantRegistry) Purge(ctx context.Context, id ID) error {
 	if info.Status != "archived" {
 		return ErrTenantNotArchived
 	}
-	return fmt.Errorf("orm: Tenants().Purge ist noch nicht implementiert (siehe TASK.md)")
+	return fmt.Errorf("orm: Tenants().Purge ist noch nicht implementiert (siehe doc/TASK.md)")
 }
 
 type rowScanner interface{ Scan(dest ...any) error }

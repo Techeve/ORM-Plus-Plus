@@ -8,8 +8,8 @@ Model-first Persistenz-Modul für Go: klassisches ORM-Mapping **plus** Event Sou
 
 Die konsumierende Anwendung deklariert Modelle (Go-Structs mit Tags) und arbeitet mit Commands, Events und typisierten Queries — sie schreibt **kein SQL** und kennt keine DB-Details.
 
-- **[API.md](API.md)** — die vollständige API-Spezifikation (Implementierungsvertrag): Instanziierung, Modelle, Queries, Event Sourcing, Migration, Clusterbetrieb.
-- **[ROADMAP.md](ROADMAP.md)** — Architektur-Entscheidungen, physisches Schema und Phasenplan.
+- **[doc/API.md](doc/API.md)** — die vollständige API-Spezifikation (Implementierungsvertrag): Instanziierung, Modelle, Queries, Event Sourcing, Migration, Clusterbetrieb.
+- **[doc/ROADMAP.md](doc/ROADMAP.md)** — Architektur-Entscheidungen, physisches Schema und Phasenplan.
 
 ## Status
 

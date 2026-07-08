@@ -63,7 +63,7 @@ type Assignment struct {
 	value any
 }
 
-// Set erzeugt eine Zuweisung Feld = Wert für UpdateSet (API.md: orm.Set).
+// Set erzeugt eine Zuweisung Feld = Wert für UpdateSet (doc/API.md: orm.Set).
 func Set(field string, v any) Assignment { return Assignment{field: field, value: v} }
 
 // QueryBuilder baut typisierte Abfragen gegen ein Model.

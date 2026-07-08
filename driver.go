@@ -31,7 +31,7 @@ type queryer interface {
 type unimplementedDriver struct{ which string }
 
 func (u unimplementedDriver) connect() (*sql.DB, dialect, error) {
-	return nil, nil, fmt.Errorf("orm: %s-Treiber ist noch nicht implementiert (Phase 4, siehe ROADMAP.md)", u.which)
+	return nil, nil, fmt.Errorf("orm: %s-Treiber ist noch nicht implementiert (Phase 4, siehe doc/ROADMAP.md)", u.which)
 }
 
 // Postgres verbindet mit PostgreSQL (Phase 4).

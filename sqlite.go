@@ -24,7 +24,7 @@ func (d sqliteDriver) connect() (*sql.DB, dialect, error) {
 		return nil, nil, fmt.Errorf("orm: SQLite öffnen: %w", err)
 	}
 	// Eine Verbindung: SQLite hat genau einen Schreiber; ein getrennter
-	// Lese-Pool ist eine spätere Optimierung (TASK.md).
+	// Lese-Pool ist eine spätere Optimierung (doc/TASK.md).
 	sdb.SetMaxOpenConns(1)
 	return sdb, sqliteDialect{}, nil
 }
