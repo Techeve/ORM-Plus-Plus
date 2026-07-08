@@ -11,8 +11,8 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 |---|---|---|
 | 5.1 | Feld-Verschlüsselung: `encrypted`-Tag (AES-256-GCM, BLOB), `orm.Encryption`/`KeyProvider`/`StaticKey`, Key-ID im Ciphertext (lazy Rotation), nicht filter-/sortierbar, `UpdateSet` engine-seitig; v1: CRUD-Modelle (ES abgelehnt, folgt) | ✅ |
 | 5.2 | `Tenants().Export` — DSGVO-Auszug als JSON Lines: Kopfzeile + Zeilen aller tenant-gebundenen Modelle, ES-Events als CloudEvents-1.0-JSON (Hot + Archiv), Snapshots; encrypted-Felder entschlüsselt; archivierte Tenants exportierbar | ✅ |
-| 5.3 | `Tenants().Purge` — physisches Löschen über alle Tabellen, auditiert | ⏳ |
-| 5.4 | `MigrationStatus`/`Health` — Observability | — |
+| 5.3 | `Tenants().Purge` — physisches Löschen über alle tenant-gebundenen Tabellen, Event-Logs, Archive, Snapshots und Alt-Tabellen laufender Migrationen; FK-sichere Reihenfolge (umgekehrte Topo-Sortierung); nur archivierte Tenants; atomar; auditiert in `ormpp_schema_history`; Tenant-Zeile + Cache entfernt | ✅ |
+| 5.4 | `MigrationStatus`/`Health` — Observability | ⏳ |
 | 5.5 | `SetGeo` (GeoFlexible-Metadaten) + Abschluss-Doku | — |
 
 ## Phase-4b-Arbeitsplan (Reihenfolge)

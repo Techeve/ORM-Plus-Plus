@@ -261,3 +261,89 @@ func TestTenantExport(t *testing.T) {
 		t.Fatalf("Export archiviert: %v", err)
 	}
 }
+
+func TestTenantPurge(t *testing.T) {
+	store := newTestStore(t)
+	db, err := Open(store(), Encryption(StaticKey(testKey(1))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	Register[Vault](db, CRUD())
+	Register[Ticket](db, EventSourced(), ticketEvents(), SnapshotEvery(2))
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	bg := context.Background()
+	tenA, _ := db.Tenants().Create(bg, TenantInfo{Name: "Löschkandidat"})
+	tenB, _ := db.Tenants().Create(bg, TenantInfo{Name: "Bleibt"})
+	ctxA := WithTenant(bg, tenA.ID)
+	ctxB := WithTenant(bg, tenB.ID)
+
+	if err := Repo[Vault](db).Insert(ctxA, &Vault{Name: "va", APIKey: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Repo[Vault](db).Insert(ctxB, &Vault{Name: "vb", APIKey: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	tk := New[Ticket](db)
+	if _, err := tk.Append(ctxA, TicketOpened{Title: "weg"}, NoteAdded{Note: "n"}, NoteAdded{Note: "n2"}); err != nil {
+		t.Fatal(err)
+	}
+	tkB := New[Ticket](db)
+	if _, err := tkB.Append(ctxB, TicketOpened{Title: "bleibt"}); err != nil {
+		t.Fatal(err)
+	}
+	m := db.reg.byName["Ticket"]
+	if err := db.processProjection(bg, m); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.maybeSnapshot(bg, m); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nicht archiviert ⇒ verweigert.
+	if err := db.Tenants().Purge(bg, tenA.ID); !errors.Is(err, ErrTenantNotArchived) {
+		t.Fatalf("Purge aktiv: %v, erwartet ErrTenantNotArchived", err)
+	}
+	if err := db.Tenants().Archive(bg, tenA.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Tenants().Purge(bg, tenA.ID); err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+
+	// Alles weg — über alle Tabellen; Tenant B unberührt.
+	tidA, tidB := tenA.ID.String(), tenB.ID.String()
+	for _, tbl := range []string{"vault", "ticket", "ticket_events", "ticket_events_archive", "ticket_snapshots", "ormpp_tenants"} {
+		var a, b int
+		if err := db.q().QueryRowContext(bg, fmt.Sprintf(`SELECT COUNT(*) FROM %q WHERE tenant_id = ?`, tbl), tidA).Scan(&a); err != nil {
+			t.Fatalf("%s: %v", tbl, err)
+		}
+		if a != 0 {
+			t.Fatalf("Purge unvollständig: %d Zeilen in %s", a, tbl)
+		}
+		if tbl == "ormpp_tenants" || tbl == "ticket_events_archive" {
+			continue
+		}
+		if err := db.q().QueryRowContext(bg, fmt.Sprintf(`SELECT COUNT(*) FROM %q WHERE tenant_id = ?`, tbl), tidB).Scan(&b); err != nil {
+			t.Fatal(err)
+		}
+		if (tbl == "vault" || tbl == "ticket_events") && b == 0 {
+			t.Fatalf("Purge hat fremde Daten gelöscht (%s)", tbl)
+		}
+	}
+	// Cache invalidiert: Schreiben auf den gelöschten Tenant scheitert.
+	if err := Repo[Vault](db).Insert(ctxA, &Vault{Name: "x", APIKey: "s"}); !errors.Is(err, ErrUnknownTenant) {
+		t.Fatalf("Insert nach Purge: %v, erwartet ErrUnknownTenant", err)
+	}
+	// Auditiert.
+	var audits int
+	if err := db.q().QueryRowContext(bg,
+		`SELECT COUNT(*) FROM ormpp_schema_history WHERE phase_from = 'tenant-purge' AND phase_to = ?`, tidA).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Fatalf("Audit-Eintrag fehlt: %d", audits)
+	}
+}

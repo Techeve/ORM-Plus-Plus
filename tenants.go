@@ -285,8 +285,17 @@ func (d *DB) exportSnapshots(ctx context.Context, enc *json.Encoder, m *model, t
 	return rows.Err()
 }
 
-// Purge löscht alle Daten eines archivierten Tenants physisch (Phase 5).
+// Purge löscht ALLE Daten eines Tenants physisch — über alle tenant-
+// gebundenen Tabellen, Event-Logs, Archive und Snapshots hinweg, inklusive
+// der Alt-Tabellen einer laufenden Migration und der Tenant-Zeile selbst
+// (Recht auf Vergessenwerden). Zweistufig: der Tenant muss archiviert sein
+// (sonst ErrTenantNotArchived); der Vorgang läuft atomar und wird in
+// ormpp_schema_history auditiert.
 func (t *TenantRegistry) Purge(ctx context.Context, id ID) error {
+	d := t.d
+	if !d.migrated {
+		return fmt.Errorf("orm: Migrate muss vor Purge laufen")
+	}
 	info, err := t.Get(ctx, id)
 	if err != nil {
 		return err
@@ -294,7 +303,61 @@ func (t *TenantRegistry) Purge(ctx context.Context, id ID) error {
 	if info.Status != "archived" {
 		return ErrTenantNotArchived
 	}
-	return fmt.Errorf("orm: Tenants().Purge ist noch nicht implementiert (siehe doc/TASK.md)")
+	tid := id.String()
+
+	// Löschreihenfolge: Abhängige vor Zielen (FK-sicher) — umgekehrte
+	// Topo-Sortierung der Registry.
+	ordered, err := d.reg.sortedByDeps()
+	if err != nil {
+		return err
+	}
+	err = d.Tx(ctx, func(tx Tx) error {
+		for i := len(ordered) - 1; i >= 0; i-- {
+			m := ordered[i]
+			if !m.tenanted() {
+				continue
+			}
+			tables := []string{m.table}
+			if m.kind == kindEventSourced {
+				tables = append(tables, esEventsTable(m), esArchiveTable(m), esSnapsTable(m))
+			}
+			for _, tbl := range tables {
+				if _, err := tx.q().ExecContext(ctx,
+					fmt.Sprintf("DELETE FROM %q WHERE tenant_id = ?", tbl), tid); err != nil {
+					return fmt.Errorf("orm: Purge %s: %w", tbl, err)
+				}
+			}
+		}
+		// Alt-Tabellen einer laufenden Migration (Dual-Write) mitbereinigen.
+		d.dwMu.Lock()
+		active := d.activeReplace
+		d.dwMu.Unlock()
+		for tbl, cr := range active {
+			if !cr.oldM.tenanted() {
+				continue
+			}
+			if _, err := tx.q().ExecContext(ctx,
+				fmt.Sprintf("DELETE FROM %q WHERE tenant_id = ?", tbl), tid); err != nil {
+				return fmt.Errorf("orm: Purge Alt-Tabelle %s: %w", tbl, err)
+			}
+		}
+		// Audit-Eintrag, dann die Tenant-Zeile selbst (Name ist personenbezogen).
+		if _, err := tx.q().ExecContext(ctx, `
+			INSERT INTO ormpp_schema_history (version, phase_from, phase_to, applied_at, applied_by)
+			VALUES (0, 'tenant-purge', ?, ?, ?)`,
+			tid, nowUTC().Format(time.RFC3339Nano), d.instanceID.String()); err != nil {
+			return err
+		}
+		_, err := tx.q().ExecContext(ctx, `DELETE FROM ormpp_tenants WHERE tenant_id = ?`, tid)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	t.mu.Lock()
+	delete(t.cache, id)
+	t.mu.Unlock()
+	return nil
 }
 
 type rowScanner interface{ Scan(dest ...any) error }
