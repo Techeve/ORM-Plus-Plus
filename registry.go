@@ -57,6 +57,11 @@ type field struct {
 	refModel string // Go-Struct-Name des Ziel-Models ("" = keine Referenz)
 	refOn    onDelete
 	ref      *model // aufgelöst in resolve()
+
+	// Vorgebaute Prüf-Statements (resolve): Referenz-Existenz und
+	// restrict-Vorprüfung — nie im Hot Path zusammensetzen.
+	refSQL      string
+	restrictSQL string
 }
 
 // model ist der kompilierte Plan eines registrierten Models.
@@ -72,6 +77,20 @@ type model struct {
 	es      *esInfo // nur bei kindEventSourced
 	// referencedBy: Modelle, die per ref auf dieses Model zeigen (für restrict-Prüfung).
 	referencedBy []*model
+
+	// sqlc: die SQL-Gerüste eines Models werden EINMAL bei resolve gebaut
+	// (?-Platzhalter-Form; das Dialekt-Rebinding läuft weiter in dialq) —
+	// im Hot Path nur noch Lookup statt fmt.Sprintf pro Aufruf.
+	sqlc struct {
+		selectList string
+		insert     string
+		getByPK    string
+		update     string
+		upsert     string
+		deleteByPK string
+	}
+	// updateFields: die Nicht-pk-/Nicht-immutable-Felder in SET-Reihenfolge.
+	updateFields []*field
 }
 
 func (m *model) tenanted() bool { return !m.opts.tenantFree }
@@ -405,12 +424,85 @@ func (r *registry) resolve() error {
 			}
 			f.ref = target
 			target.referencedBy = append(target.referencedBy, m)
+			// Prüf-Statements einmalig bauen (Hot-Path: nur noch Lookup).
+			f.refSQL = fmt.Sprintf("SELECT 1 FROM %q WHERE %q = ?", target.table, target.pkColumn())
+			if target.tenanted() {
+				f.refSQL += ` AND tenant_id = ?`
+			}
+			f.restrictSQL = fmt.Sprintf("SELECT 1 FROM %q WHERE %q = ? LIMIT 1", m.table, f.column)
 		}
 	}
 	if len(errs) > 0 {
 		return joinErrs(errs)
 	}
+	for _, m := range r.ordered {
+		m.buildSQL()
+	}
 	return nil
+}
+
+// buildSQL baut die SQL-Gerüste eines Models genau einmal (bei resolve).
+// Spalten- und Werte-Reihenfolge sind der Vertrag zwischen diesem Cache
+// und prepareWrite: Felder in Deklarationsreihenfolge, dann tenant_id
+// (falls tenant-gebunden), geo, geo_replicas (falls GeoFlexible).
+func (m *model) buildSQL() {
+	cols := make([]string, len(m.fields))
+	for i, f := range m.fields {
+		cols[i] = f.column
+	}
+	if m.kind == kindEventSourced {
+		// ES-Read-Models: nur der Query-Pfad läuft hierüber.
+		m.sqlc.selectList = quoteAll(cols...) + `, "id", "aggregate_seq"`
+		return
+	}
+	m.sqlc.selectList = quoteAll(cols...)
+
+	insCols := append([]string{}, cols...)
+	if m.tenanted() {
+		insCols = append(insCols, "tenant_id")
+	}
+	insCols = append(insCols, "geo")
+	if m.opts.geoMode == geoFlexible {
+		insCols = append(insCols, "geo_replicas")
+	}
+	m.sqlc.insert = insertSQL(m.table, insCols)
+
+	g := fmt.Sprintf("SELECT %s FROM %q WHERE %q = ?", m.sqlc.selectList, m.table, m.pk.column)
+	if m.tenanted() {
+		g += ` AND tenant_id = ?`
+	}
+	m.sqlc.getByPK = g
+
+	var sets, upserts []string
+	for _, f := range m.fields {
+		if f.pk || f.immutable {
+			continue
+		}
+		m.updateFields = append(m.updateFields, f)
+		sets = append(sets, fmt.Sprintf("%q = ?", f.column))
+		upserts = append(upserts, fmt.Sprintf("%q = excluded.%q", f.column, f.column))
+	}
+	u := fmt.Sprintf("UPDATE %q SET %s WHERE %q = ?", m.table, strings.Join(sets, ", "), m.pk.column)
+	if m.tenanted() {
+		u += ` AND tenant_id = ?`
+	}
+	if m.version != nil {
+		u += fmt.Sprintf(" AND %q = ?", m.version.column)
+	}
+	m.sqlc.update = u
+
+	if len(upserts) > 0 {
+		m.sqlc.upsert = m.sqlc.insert + fmt.Sprintf(" ON CONFLICT (%q) DO UPDATE SET %s",
+			m.pk.column, strings.Join(upserts, ", "))
+	} else {
+		m.sqlc.upsert = m.sqlc.insert + fmt.Sprintf(" ON CONFLICT (%q) DO NOTHING", m.pk.column)
+	}
+
+	dq := fmt.Sprintf("DELETE FROM %q WHERE %q = ?", m.table, m.pk.column)
+	if m.tenanted() {
+		dq += ` AND tenant_id = ?`
+	}
+	m.sqlc.deleteByPK = dq
 }
 
 // sortedByDeps liefert die Modelle topologisch sortiert (Referenzziele zuerst),

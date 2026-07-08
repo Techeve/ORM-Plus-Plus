@@ -56,14 +56,14 @@ func (r *repo[T]) scope(ctx context.Context) (tenant ID, geo string, err error) 
 	return tenant, geo, nil
 }
 
-// prepareWrite validiert Constraints und erzeugt die Spalten/Werte eines Inserts.
-func (r *repo[T]) prepareWrite(ctx context.Context, e *T, tenant ID, geo string) ([]string, []any, error) {
+// prepareWrite validiert Constraints und erzeugt die Insert-Werte —
+// in exakt der Spaltenreihenfolge des gecachten Statements (buildSQL).
+func (r *repo[T]) prepareWrite(ctx context.Context, e *T, tenant ID, geo string) ([]any, error) {
 	d := r.h.db()
 	rv := reflect.ValueOf(e).Elem()
 	now := nowValue()
 
-	var cols []string
-	var vals []any
+	vals := make([]any, 0, len(r.m.fields)+3)
 	for _, f := range r.m.fields {
 		fv := rv.FieldByIndex(f.index)
 
@@ -80,41 +80,37 @@ func (r *repo[T]) prepareWrite(ctx context.Context, e *T, tenant ID, geo string)
 			fv.SetString(f.defaultVal)
 		}
 		if f.required && fv.IsZero() {
-			return nil, nil, fmt.Errorf("%w: %s.%s", ErrRequiredField, r.m.name, f.name)
+			return nil, fmt.Errorf("%w: %s.%s", ErrRequiredField, r.m.name, f.name)
 		}
 		if err := checkEnum(r.m, f, fv); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if err := r.checkRef(ctx, f, fv, tenant); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
-		v, err := encodeField(r.h.db(), f, fv)
+		v, err := encodeField(d, f, fv)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		cols = append(cols, f.column)
 		vals = append(vals, v)
 	}
 	if r.m.tenanted() {
 		if err := d.tenants.verify(tenant); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		cols = append(cols, "tenant_id")
 		vals = append(vals, tenant.String())
 	}
-	cols = append(cols, "geo")
 	vals = append(vals, geo)
 	if r.m.opts.geoMode == geoFlexible {
 		g, _ := geoFrom(ctx)
 		reps, err := d.replicasJSON(g)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		cols = append(cols, "geo_replicas")
 		vals = append(vals, reps)
 	}
-	return cols, vals, nil
+	return vals, nil
 }
 
 // checkRef verifiziert eine Referenz engine-seitig (zusätzlich zum FK):
@@ -137,14 +133,12 @@ func (r *repo[T]) checkRef(ctx context.Context, f *field, fv reflect.Value, tena
 		}
 		return nil
 	}
-	query := fmt.Sprintf("SELECT 1 FROM %q WHERE %q = ?", f.ref.table, f.ref.pkColumn())
 	args := []any{target.String()}
 	if f.ref.tenanted() {
-		query += ` AND tenant_id = ?`
 		args = append(args, tenant.String())
 	}
 	var one int
-	if err := r.h.q().QueryRowContext(ctx, query, args...).Scan(&one); err != nil {
+	if err := r.h.q().QueryRowContext(ctx, f.refSQL, args...).Scan(&one); err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("%w: %s.%s → %s(%s)", ErrInvalidReference, r.m.name, f.name, f.refModel, target)
 		}
@@ -158,11 +152,11 @@ func (r *repo[T]) Insert(ctx context.Context, e *T) error {
 	if err != nil {
 		return err
 	}
-	cols, vals, err := r.prepareWrite(ctx, e, tenant, geo)
+	vals, err := r.prepareWrite(ctx, e, tenant, geo)
 	if err != nil {
 		return err
 	}
-	_, err = r.h.q().ExecContext(ctx, insertSQL(r.m.table, cols), vals...)
+	_, err = r.h.q().ExecContext(ctx, r.m.sqlc.insert, vals...)
 	return err
 }
 
@@ -174,14 +168,32 @@ func (r *repo[T]) InsertMany(ctx context.Context, entities []*T, opts ...BatchOp
 	if bo.chunk <= 0 {
 		bo.chunk = len(entities)
 	}
+	tenant, geo, err := r.scope(ctx)
+	if err != nil {
+		return err
+	}
 	d := r.h.db()
 	for start := 0; start < len(entities); start += bo.chunk {
 		end := min(start+bo.chunk, len(entities))
 		chunk := entities[start:end]
 		err := d.Tx(ctx, func(tx Tx) error {
+			// Das Insert-Statement EINMAL pro Chunk-Transaktion präparieren
+			// und wiederverwenden — pgx cached ohnehin, SQLite spart das
+			// Parse/Prepare pro Zeile. Alle Integritätsprüfungen (required,
+			// enum, ref, Tenant) laufen unverändert pro Entität.
+			th := tx.(*txHandle)
+			stmt, err := th.tx.PrepareContext(ctx, d.dial.rebind(r.m.sqlc.insert))
+			if err != nil {
+				return err
+			}
+			defer func() { _ = stmt.Close() }()
 			cr := &repo[T]{h: tx, m: r.m}
 			for _, e := range chunk {
-				if err := cr.Insert(ctx, e); err != nil {
+				vals, err := cr.prepareWrite(ctx, e, tenant, geo)
+				if err != nil {
+					return err
+				}
+				if _, err := stmt.ExecContext(ctx, vals...); err != nil {
 					return err
 				}
 			}
@@ -199,11 +211,9 @@ func (r *repo[T]) get(ctx context.Context, id ID, lock bool) (*T, error) {
 	if err != nil {
 		return nil, err
 	}
-	query := fmt.Sprintf("SELECT %s FROM %q WHERE %q = ?",
-		selectList(r.m), r.m.table, r.m.pk.column)
+	query := r.m.sqlc.getByPK
 	args := []any{id.String()}
 	if r.m.tenanted() {
-		query += ` AND tenant_id = ?`
 		args = append(args, tenant.String())
 	}
 	if lock {
@@ -245,13 +255,9 @@ func (r *repo[T]) Update(ctx context.Context, e *T) error {
 		return ErrNotFound
 	}
 
-	var sets []string
-	var vals []any
+	vals := make([]any, 0, len(r.m.updateFields)+3)
 	var oldVersion int64
-	for _, f := range r.m.fields {
-		if f.pk || f.immutable {
-			continue
-		}
+	for _, f := range r.m.updateFields {
 		fv := rv.FieldByIndex(f.index)
 		if f.autoUpdate {
 			fv.Set(nowValue())
@@ -270,22 +276,18 @@ func (r *repo[T]) Update(ctx context.Context, e *T) error {
 		if err != nil {
 			return err
 		}
-		sets = append(sets, fmt.Sprintf("%q = ?", f.column))
 		vals = append(vals, v)
 	}
 
-	query := fmt.Sprintf("UPDATE %q SET %s WHERE %q = ?", r.m.table, strings.Join(sets, ", "), r.m.pk.column)
 	vals = append(vals, pk.String())
 	if r.m.tenanted() {
-		query += ` AND tenant_id = ?`
 		vals = append(vals, tenant.String())
 	}
 	if r.m.version != nil {
-		query += fmt.Sprintf(" AND %q = ?", r.m.version.column)
 		vals = append(vals, oldVersion)
 	}
 
-	res, err := r.h.q().ExecContext(ctx, query, vals...)
+	res, err := r.h.q().ExecContext(ctx, r.m.sqlc.update, vals...)
 	if err != nil {
 		return err
 	}
@@ -311,20 +313,11 @@ func (r *repo[T]) Upsert(ctx context.Context, e *T) error {
 	if err != nil {
 		return err
 	}
-	cols, vals, err := r.prepareWrite(ctx, e, tenant, geo)
+	vals, err := r.prepareWrite(ctx, e, tenant, geo)
 	if err != nil {
 		return err
 	}
-	var updates []string
-	for _, f := range r.m.fields {
-		if f.pk || f.immutable {
-			continue
-		}
-		updates = append(updates, fmt.Sprintf("%q = excluded.%q", f.column, f.column))
-	}
-	query := insertSQL(r.m.table, cols) + fmt.Sprintf(
-		" ON CONFLICT (%q) DO UPDATE SET %s", r.m.pk.column, strings.Join(updates, ", "))
-	_, err = r.h.q().ExecContext(ctx, query, vals...)
+	_, err = r.h.q().ExecContext(ctx, r.m.sqlc.upsert, vals...)
 	return err
 }
 
@@ -338,8 +331,7 @@ func (r *repo[T]) Delete(ctx context.Context, id ID) error {
 		for _, f := range by.fields {
 			if f.ref == r.m && f.refOn == odRestrict {
 				var one int
-				q := fmt.Sprintf("SELECT 1 FROM %q WHERE %q = ? LIMIT 1", by.table, f.column)
-				err := r.h.q().QueryRowContext(ctx, q, id.String()).Scan(&one)
+				err := r.h.q().QueryRowContext(ctx, f.restrictSQL, id.String()).Scan(&one)
 				if err == nil {
 					return fmt.Errorf("%w: %s.%s", ErrReferenceInUse, by.name, f.name)
 				}
@@ -349,13 +341,11 @@ func (r *repo[T]) Delete(ctx context.Context, id ID) error {
 			}
 		}
 	}
-	query := fmt.Sprintf("DELETE FROM %q WHERE %q = ?", r.m.table, r.m.pk.column)
 	args := []any{id.String()}
 	if r.m.tenanted() {
-		query += ` AND tenant_id = ?`
 		args = append(args, tenant.String())
 	}
-	res, err := r.h.q().ExecContext(ctx, query, args...)
+	res, err := r.h.q().ExecContext(ctx, r.m.sqlc.deleteByPK, args...)
 	if err != nil {
 		return err
 	}
@@ -477,6 +467,10 @@ func insertSQL(table string, cols []string) string {
 }
 
 func selectList(m *model) string {
+	if m.sqlc.selectList != "" {
+		return m.sqlc.selectList
+	}
+	// Fallback vor resolve (interne Pfade, Scratch-Pläne).
 	cols := make([]string, len(m.fields))
 	for i, f := range m.fields {
 		cols[i] = f.column
