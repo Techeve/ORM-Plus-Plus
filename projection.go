@@ -31,7 +31,7 @@ func setCheckpoint(ctx context.Context, q queryer, consumer, geo string, seq int
 // eventGeos liefert alle Geos, die im Event-Log eines Models vorkommen
 // (inkl. Archiv — für Rebuilds vollständig archivierter Geos).
 func (d *DB) eventGeos(ctx context.Context, m *model) ([]string, error) {
-	rows, err := d.q().QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT geo FROM %s`, esEventsFrom(m, true)))
+	rows, err := d.qr().QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT geo FROM %s`, esEventsFrom(m, true)))
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +130,7 @@ func (d *DB) processProjection(ctx context.Context, m *model) error {
 		return err
 	}
 	for _, geo := range geos {
-		cp, err := getCheckpoint(ctx, d.q(), consumer, geo)
+		cp, err := getCheckpoint(ctx, d.qr(), consumer, geo)
 		if err != nil {
 			return err
 		}
@@ -147,7 +147,7 @@ func (d *DB) processProjection(ctx context.Context, m *model) error {
 				sel = `"aggregate_id", "tenant_id", "seq"`
 			}
 			query := fmt.Sprintf(`SELECT %s FROM %q WHERE geo = ? AND seq > ? ORDER BY seq`, sel, esEventsTable(m))
-			rows, err := d.q().QueryContext(ctx, query, geo, cp)
+			rows, err := d.qr().QueryContext(ctx, query, geo, cp)
 			if err != nil {
 				return err
 			}
@@ -280,7 +280,7 @@ func (d *DB) processReactor(ctx context.Context, r *reactor) error {
 	}
 	for _, geo := range geos {
 		for {
-			cp, err := getCheckpoint(ctx, d.q(), consumer, geo)
+			cp, err := getCheckpoint(ctx, d.qr(), consumer, geo)
 			if err != nil {
 				return err
 			}
@@ -288,7 +288,7 @@ func (d *DB) processReactor(ctx context.Context, r *reactor) error {
 			// archivierte Events erneut ein.
 			query := fmt.Sprintf(`SELECT %s FROM %s WHERE geo = ? AND seq > ? ORDER BY seq LIMIT 500`,
 				esEventSelect(m), esEventsFrom(m, true))
-			batch, err := fetchEventRows(ctx, d.q(), m, query, []any{geo, cp})
+			batch, err := fetchEventRows(ctx, d.qr(), m, query, []any{geo, cp})
 			if err != nil {
 				return err
 			}
@@ -352,7 +352,7 @@ func (d *DB) maybeSnapshot(ctx context.Context, m *model) error {
 			sel = `"aggregate_id", "tenant_id", MAX("aggregate_seq"), MIN("occurred_at")`
 			group = `"aggregate_id", "tenant_id"`
 		}
-		rows, err := d.q().QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM %q GROUP BY %s`, sel, ev, group))
+		rows, err := d.qr().QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM %q GROUP BY %s`, sel, ev, group))
 		if err != nil {
 			return err
 		}
@@ -386,7 +386,7 @@ func (d *DB) maybeSnapshot(ctx context.Context, m *model) error {
 	}
 	snaps := map[string]snapState{}
 	{
-		rows, err := d.q().QueryContext(ctx, fmt.Sprintf(
+		rows, err := d.qr().QueryContext(ctx, fmt.Sprintf(
 			`SELECT "aggregate_id", MAX("aggregate_seq"), MAX("taken_at") FROM %q GROUP BY "aggregate_id"`, sn))
 		if err != nil {
 			return err
@@ -441,7 +441,7 @@ func (d *DB) snapshotAggregate(ctx context.Context, m *model, aggID string, tena
 	}
 	inst := reflect.New(m.goType)
 	agg := wireAggregate(m, inst.Interface(), d, id)
-	if err := d.foldInto(ctx, d.q(), m, agg, tenant, 0, nil); err != nil {
+	if err := d.foldInto(ctx, d.qr(), m, agg, tenant, 0, nil); err != nil {
 		return err
 	}
 	if agg.version == 0 {
@@ -496,7 +496,7 @@ func (d *DB) maybeArchive(ctx context.Context, m *model) error {
 	}
 	var bounds []bound
 	{
-		rows, err := d.q().QueryContext(ctx, fmt.Sprintf(`
+		rows, err := d.qr().QueryContext(ctx, fmt.Sprintf(`
 			SELECT s.aggregate_id, MAX(s.aggregate_seq) FROM %q s
 			WHERE s.aggregate_seq < (SELECT MAX(s2.aggregate_seq) FROM %q s2 WHERE s2.aggregate_id = s.aggregate_id)
 			GROUP BY s.aggregate_id`, sn, sn))
@@ -527,7 +527,7 @@ func (d *DB) maybeArchive(ctx context.Context, m *model) error {
 		return err
 	}
 	for _, geo := range geos {
-		cp, err := getCheckpoint(ctx, d.q(), "projection:"+m.table, geo)
+		cp, err := getCheckpoint(ctx, d.qr(), "projection:"+m.table, geo)
 		if err != nil {
 			return err
 		}
@@ -541,7 +541,7 @@ func (d *DB) maybeArchive(ctx context.Context, m *model) error {
 	for _, b := range bounds {
 		// Heimat-Geo des Aggregats (Geo-Pinning) für die Checkpoint-Grenze.
 		var geo string
-		switch err := d.q().QueryRowContext(ctx,
+		switch err := d.qr().QueryRowContext(ctx,
 			fmt.Sprintf(`SELECT geo FROM %q WHERE aggregate_id = ? ORDER BY aggregate_seq DESC LIMIT 1`, ev),
 			b.id).Scan(&geo); err {
 		case nil:
@@ -585,7 +585,7 @@ func (d *DB) waitForProjection(ctx context.Context, m *model, pos Position, time
 	for {
 		done := true
 		for geo, want := range pos.seqs {
-			cp, err := getCheckpoint(ctx, d.q(), consumer, geo)
+			cp, err := getCheckpoint(ctx, d.qr(), consumer, geo)
 			if err != nil {
 				return err
 			}

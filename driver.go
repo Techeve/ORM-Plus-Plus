@@ -10,6 +10,14 @@ type Driver interface {
 	connect() (*sql.DB, dialect, error)
 }
 
+// readPooler liefert optional einen getrennten Lese-Pool. SQLite nutzt das:
+// WAL erlaubt viele Leser neben dem EINEN Schreiber — Worker-Reads, Loads
+// und Streams konkurrieren dann nicht mehr mit Schreibzugriffen um die
+// serialisierte Schreib-Connection. PG/YB brauchen das nicht (Pool).
+type readPooler interface {
+	connectRead() (*sql.DB, error)
+}
+
 // colKind klassifiziert Spaltentypen backend-neutral; der Dialekt mappt
 // auf den physischen Typ.
 type colKind int

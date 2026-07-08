@@ -116,7 +116,7 @@ func Stream[T any](ctx context.Context, h Handle, opts ...StreamOption) iter.Seq
 		for g, s := range so.from.seqs {
 			delivered[g] = s
 		}
-		if err := d.replayEvents(ctx, h.q(), m, tenant, delivered, func(ce CloudEvent) bool {
+		if err := d.replayEvents(ctx, readQ(h), m, tenant, delivered, func(ce CloudEvent) bool {
 			return yield(ce, nil)
 		}); err != nil {
 			yield(CloudEvent{}, err)
@@ -156,7 +156,7 @@ func Watch[T any](ctx context.Context, h Handle, opts ...StreamOption) <-chan Cl
 		}
 		// Nachzügler ab der Position aus dem Log, dann live weiter.
 		if len(so.from.seqs) > 0 {
-			_ = d.replayEvents(ctx, d.q(), m, tenant, delivered, func(ce CloudEvent) bool {
+			_ = d.replayEvents(ctx, d.qr(), m, tenant, delivered, func(ce CloudEvent) bool {
 				select {
 				case out <- ce:
 					return true

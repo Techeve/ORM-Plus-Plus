@@ -109,7 +109,7 @@ func Load[T any](ctx context.Context, h Handle, id ID, opts ...LoadOption) (*T, 
 	}
 	e := new(T)
 	agg := wireAggregate(m, e, h, id)
-	if err := d.foldInto(ctx, h.q(), m, agg, tenant, 0, nil); err != nil {
+	if err := d.foldInto(ctx, readQ(h), m, agg, tenant, 0, nil); err != nil {
 		return nil, err
 	}
 	if agg.version == 0 {
@@ -408,7 +408,7 @@ func (a *Aggregate) Refresh(ctx context.Context, opts ...LoadOption) error {
 	}
 	fresh := reflect.New(m.goType)
 	freshAgg := wireAggregate(m, fresh.Interface(), a.rt.h, a.id)
-	if err := d.foldInto(ctx, a.rt.h.q(), m, freshAgg, tenant, 0, nil); err != nil {
+	if err := d.foldInto(ctx, readQ(a.rt.h), m, freshAgg, tenant, 0, nil); err != nil {
 		return err
 	}
 	if freshAgg.version == 0 {
@@ -446,7 +446,7 @@ func (a *Aggregate) rebuild(ctx context.Context, upToSeq int64, upToTime *time.T
 	}
 	fresh := reflect.New(m.goType).Interface()
 	freshAgg := wireAggregate(m, fresh, a.rt.h, a.id)
-	if err := d.foldInto(ctx, a.rt.h.q(), m, freshAgg, tenant, upToSeq, upToTime); err != nil {
+	if err := d.foldInto(ctx, readQ(a.rt.h), m, freshAgg, tenant, upToSeq, upToTime); err != nil {
 		return nil, err
 	}
 	if freshAgg.version == 0 {
@@ -483,7 +483,7 @@ func (a *Aggregate) History(ctx context.Context) iter.Seq2[CloudEvent, error] {
 				args = append(args, tenant.String())
 			}
 			query += ` ORDER BY aggregate_seq LIMIT 500`
-			batch, err := fetchEventRows(ctx, a.rt.h.q(), m, query, args)
+			batch, err := fetchEventRows(ctx, readQ(a.rt.h), m, query, args)
 			if err != nil {
 				yield(CloudEvent{}, err)
 				return

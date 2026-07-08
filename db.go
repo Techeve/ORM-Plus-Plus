@@ -25,6 +25,7 @@ type Handle interface {
 // DB ist die zentrale ORM++-Instanz einer Anwendung.
 type DB struct {
 	sql     *sql.DB
+	sqlRead *sql.DB // getrennter Lese-Pool (SQLite/WAL); nil = sql verwenden
 	dial    dialect
 	opts    openOptions
 	reg     *registry
@@ -60,6 +61,24 @@ func (d *DB) db() *DB    { return d }
 func (d *DB) q() queryer { return dialq{q: d.sql, dial: d.dial} }
 func (d *DB) inTx() bool { return false }
 
+// qr liefert den Lese-Queryer: der getrennte Lese-Pool, wo vorhanden
+// (SQLite/WAL), sonst der normale Pool. Nur für Reads AUSSERHALB von
+// Transaktionen — in einer Tx müssen Reads die Tx-Verbindung nutzen.
+func (d *DB) qr() queryer {
+	if d.sqlRead != nil {
+		return dialq{q: d.sqlRead, dial: d.dial}
+	}
+	return dialq{q: d.sql, dial: d.dial}
+}
+
+// readQ wählt den richtigen Lese-Queryer für ein Handle.
+func readQ(h Handle) queryer {
+	if h.inTx() {
+		return h.q()
+	}
+	return h.db().qr()
+}
+
 // Tx ist eine laufende Transaktion.
 type Tx interface {
 	Handle
@@ -88,9 +107,17 @@ func Open(driver Driver, opts ...OpenOption) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	var rdb *sql.DB
+	if rp, ok := driver.(readPooler); ok {
+		if rdb, err = rp.connectRead(); err != nil {
+			_ = sdb.Close()
+			return nil, err
+		}
+	}
 	host, _ := os.Hostname()
 	d := &DB{
 		sql:           sdb,
+		sqlRead:       rdb,
 		dial:          dial,
 		opts:          o,
 		reg:           newRegistry(),
@@ -117,6 +144,9 @@ func (d *DB) Close() error {
 	}
 	if d.migrated {
 		d.deregisterInstance(bgCtx())
+	}
+	if d.sqlRead != nil {
+		_ = d.sqlRead.Close()
 	}
 	return d.sql.Close()
 }

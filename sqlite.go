@@ -23,10 +23,25 @@ func (d sqliteDriver) connect() (*sql.DB, dialect, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("orm: SQLite öffnen: %w", err)
 	}
-	// Eine Verbindung: SQLite hat genau einen Schreiber; ein getrennter
-	// Lese-Pool ist eine spätere Optimierung (doc/TASK.md).
+	// Eine Verbindung: SQLite hat genau einen Schreiber. Lesende Pfade
+	// laufen über den getrennten Lese-Pool (connectRead).
 	sdb.SetMaxOpenConns(1)
 	return sdb, sqliteDialect{}, nil
+}
+
+// connectRead öffnet den Lese-Pool: WAL erlaubt beliebig viele Leser
+// parallel zum Schreiber; query_only macht die Verbindungen hart lesend.
+func (d sqliteDriver) connectRead() (*sql.DB, error) {
+	dsn := fmt.Sprintf(
+		"file:%s?_pragma=query_only(1)&_pragma=busy_timeout(5000)",
+		url.PathEscape(d.path),
+	)
+	rdb, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("orm: SQLite-Lese-Pool öffnen: %w", err)
+	}
+	rdb.SetMaxOpenConns(4)
+	return rdb, nil
 }
 
 type sqliteDialect struct{}
