@@ -66,6 +66,15 @@ func (d *DB) workerLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-d.wake:
+			// Burst-Koaleszierung: kurz sammeln, damit EINE Projektions-
+			// Transaktion viele Events abdeckt — sonst schiebt sich auf
+			// SQLite zwischen jedes Append ein Worker-Commit (fsync).
+			// Kostet Read-your-writes höchstens diese Spanne.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(15 * time.Millisecond):
+			}
 		case <-tick.C:
 		}
 	}
