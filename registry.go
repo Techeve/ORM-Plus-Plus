@@ -68,11 +68,21 @@ type model struct {
 	fields  []*field
 	pk      *field
 	version *field
+	es      *esInfo // nur bei kindEventSourced
 	// referencedBy: Modelle, die per ref auf dieses Model zeigen (für restrict-Prüfung).
 	referencedBy []*model
 }
 
 func (m *model) tenanted() bool { return !m.opts.tenantFree }
+
+// pkColumn liefert die Primärschlüssel-Spalte — bei ES-Modellen die
+// implizite "id" des Read-Models.
+func (m *model) pkColumn() string {
+	if m.kind == kindEventSourced {
+		return "id"
+	}
+	return m.pk.column
+}
 
 func (m *model) fieldByName(name string) *field {
 	for _, f := range m.fields {
@@ -156,7 +166,11 @@ func register(r *registry, t reflect.Type, mode ModelMode, opts ...ModelOption) 
 		}
 	}
 
-	if m.pk == nil {
+	if mode.kind == kindEventSourced {
+		if err := compileES(m, t, mo.events); err != nil {
+			r.errf("%s: %v", m.name, err)
+		}
+	} else if m.pk == nil {
 		r.errf("%s: kein pk-Feld deklariert", m.name)
 	} else if m.pk.goType != idType {
 		r.errf("%s: pk-Feld muss orm.ID sein", m.name)
@@ -173,6 +187,68 @@ func register(r *registry, t reflect.Type, mode ModelMode, opts ...ModelOption) 
 	r.models[t] = m
 	r.byName[m.name] = m
 	r.ordered = append(r.ordered, m)
+}
+
+var (
+	aggregateType = reflect.TypeOf(Aggregate{})
+	applierType   = reflect.TypeOf((*applier)(nil)).Elem()
+)
+
+// compileES validiert ein EventSourced-Model und kompiliert die Event-Deklarationen.
+func compileES(m *model, t reflect.Type, decls []EventDecl) error {
+	var aggIdx []int
+	for i := 0; i < t.NumField(); i++ {
+		sf := t.Field(i)
+		if sf.Anonymous && sf.Type == aggregateType {
+			aggIdx = sf.Index
+			break
+		}
+	}
+	if aggIdx == nil {
+		return fmt.Errorf("EventSourced-Model muss orm.Aggregate einbetten")
+	}
+	if !reflect.PointerTo(t).Implements(applierType) {
+		return fmt.Errorf("Apply(orm.Event) error fehlt (Pointer-Receiver)")
+	}
+	if m.pk != nil {
+		return fmt.Errorf("pk-Tag nicht erlaubt — die ID kommt aus orm.Aggregate")
+	}
+	if len(decls) == 0 {
+		return fmt.Errorf("orm.Events(orm.E[...](...), …) fehlt")
+	}
+	for _, f := range m.fields {
+		if f.column == "id" || f.column == "aggregate_seq" {
+			return fmt.Errorf("das Feld %s kollidiert mit der impliziten Read-Model-Spalte %q", f.name, f.column)
+		}
+	}
+	es := &esInfo{
+		aggIdx: aggIdx,
+		byType: map[reflect.Type]*eventDecl{},
+		byName: map[string]*eventDecl{},
+	}
+	for _, d := range decls {
+		if d.name == "" {
+			return fmt.Errorf("Event ohne Namen deklariert")
+		}
+		if d.payload.Kind() != reflect.Struct {
+			return fmt.Errorf("Event %q: Payload %s muss ein Struct sein", d.name, d.payload)
+		}
+		if d.version < 1 {
+			return fmt.Errorf("Event %q: Version muss ≥ 1 sein", d.name)
+		}
+		if _, dup := es.byName[d.name]; dup {
+			return fmt.Errorf("Event %q doppelt deklariert", d.name)
+		}
+		if _, dup := es.byType[d.payload]; dup {
+			return fmt.Errorf("Payload-Typ %s doppelt deklariert", d.payload)
+		}
+		dd := &eventDecl{name: d.name, version: d.version, goType: d.payload}
+		es.decls = append(es.decls, dd)
+		es.byName[d.name] = dd
+		es.byType[d.payload] = dd
+	}
+	m.es = es
+	return nil
 }
 
 func parseField(sf reflect.StructField, tag string) (*field, error) {

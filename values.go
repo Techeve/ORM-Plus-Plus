@@ -168,11 +168,11 @@ func rawInt(raw any) (int64, bool) {
 }
 
 // scanModelRows liest alle Zeilen eines *sql.Rows in Model-Instanzen.
-func scanModelRows[T any](m *model, rows *sql.Rows) ([]*T, error) {
+func scanModelRows[T any](h Handle, m *model, rows *sql.Rows) ([]*T, error) {
 	defer rows.Close()
 	var out []*T
 	for rows.Next() {
-		e, err := scanModelRow[T](m, rows)
+		e, err := scanModelRow[T](h, m, rows)
 		if err != nil {
 			return nil, err
 		}
@@ -181,9 +181,13 @@ func scanModelRows[T any](m *model, rows *sql.Rows) ([]*T, error) {
 	return out, rows.Err()
 }
 
-func scanModelRow[T any](m *model, rows *sql.Rows) (*T, error) {
-	raws := make([]any, len(m.fields))
-	ptrs := make([]any, len(m.fields))
+func scanModelRow[T any](h Handle, m *model, rows *sql.Rows) (*T, error) {
+	n := len(m.fields)
+	if m.kind == kindEventSourced {
+		n += 2 // id, aggregate_seq (siehe selectList)
+	}
+	raws := make([]any, n)
+	ptrs := make([]any, n)
 	for i := range raws {
 		ptrs[i] = &raws[i]
 	}
@@ -196,6 +200,15 @@ func scanModelRow[T any](m *model, rows *sql.Rows) (*T, error) {
 		if err := decodeField(f, rv.FieldByIndex(f.index), raws[i]); err != nil {
 			return nil, err
 		}
+	}
+	if m.kind == kindEventSourced {
+		var id ID
+		if err := id.Scan(raws[len(m.fields)]); err != nil {
+			return nil, err
+		}
+		seq, _ := rawInt(raws[len(m.fields)+1])
+		agg := wireAggregate(m, e, h, id)
+		agg.version = seq
 	}
 	return e, nil
 }

@@ -5,7 +5,34 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 
 ## Aktueller Schritt
 
-**Phase 1 abgeschlossen** (Schritte 1.1–1.9, alle Tests + Lint grün). Nächster Schritt: Phase 2 — Event Sourcing (Event-Log-Tabellen, `orm.Aggregate`, Append, Projektion, OnEvent/Watch, Snapshots).
+**Phase 2 abgeschlossen** (Event Sourcing auf SQLite, alle Tests + Lint grün). Nächster Schritt: Phase 3 — Migrations-Engine (Expand/Contract-Zustandsmaschine, Dual-Write, Backfill-Worker, `ReplaceModel`/`BatchScript`-Ausführung, `FinalizeMigration`).
+
+## Phase-2-Arbeitsplan (Reihenfolge)
+
+| # | Schritt | Status |
+|---|---|---|
+| 2.1 | Event-Deklaration: `orm.Events`/`orm.E`/`orm.V`, ES-Validierung in der Registry (Aggregate-Einbettung, Apply, keine pk/id-Kollision) | ✅ |
+| 2.2 | Physisches Schema: Read-Model (implizite `id` + `aggregate_seq`), `<t>_events` (PK aggregate_id+seq, Unique geo+seq), `<t>_snapshots`; Systemtabellen `ormpp_event_types`, `ormpp_checkpoints` | ✅ |
+| 2.3 | `orm.Aggregate`: `New`/`Load`/`Append` (atomar, optimistisch, auch in Tx), `Refresh`, `AtVersion`/`AtTime`, `History` | ✅ |
+| 2.4 | Typ-Wörterbuch + Upcaster: `orm.Upcast`, Ketten-Validierung bei `Migrate` (Startfehler statt Lesefehler) | ✅ |
+| 2.5 | Projektions-Runtime: Worker (`StartWorkers`), Checkpoints je (Consumer, Geo), Read-Model-Upsert, `RebuildProjection` | ✅ |
+| 2.6 | Trigger-Kette: `OnEvent` (persistent, at-least-once, transaktionaler Checkpoint, `orm.Named`), `RebuildView`, `Watch` (flüchtiger Live-Hub), `Stream` | ✅ |
+| 2.7 | Read-your-writes: `orm.Position` (Cursor-Vektor je Geo), `WaitFor` an `Load`/`Refresh` (`ErrWaitTimeout`) | ✅ |
+| 2.8 | Snapshots: asynchron im Worker, `SnapshotEvery`/`SnapshotMaxAge`/`SnapshotKeepLast`/`SnapshotDisabled`, `SnapshotMarshal`/`SnapshotUnmarshal`-Opt-in, Laden = Snapshot + Restevents | ✅ |
+| 2.9 | Verhaltens-Testsuite Phase 2 (`es_test.go`, 12 Tests) | ✅ |
+
+## Phase-2-Notizen (Entscheidungen & bewusste Grenzen)
+
+- **Neue Dateien:** `event.go` (Event/CloudEvent/Position/Deklarationen/Typ-Wörterbuch), `aggregate.go` (Aggregate, New/Load/Append/Refresh/AtVersion/AtTime/History), `upcast.go`, `projection.go` (Worker/Checkpoints/OnEvent/Snapshots/Rebuild/WaitFor), `stream.go` (Stream/Watch/Live-Hub), Tests in `es_test.go`.
+- **Load faltet immer autoritativ** (Snapshot + Restevents durch `Apply`) — es hängt nie hinter dem Log. `WaitFor` betrifft die eingebaute **Projektion** (Read-Model für den Query-Builder).
+- **Append-Konfliktprüfung:** Konflikt, wenn die Log-Spitze **über** der geladenen Version liegt; kleiner ist erlaubt (Events vor dem Snapshot archiviert). Duplikate verhindert der PK `(aggregate_id, aggregate_seq)`.
+- **Apply läuft innerhalb der Append-Transaktion**: Apply-Fehler rollen die Events zurück; der In-Memory-Zustand ist danach stale → `Refresh`.
+- **Query-Ergebnisse auf ES-Modellen** sind Aggregat-verdrahtet (id/aggregate_seq werden mitselektiert): `Append` auf einem Query-Treffer funktioniert, kann aber bei nachhängender Projektion `ErrVersionConflict` liefern → `Refresh` oder `Load`.
+- **Kein FK von CRUD-Tabellen auf ES-Read-Models** — deren Zeilen sind rebuildbare Artefakte (`RebuildProjection` löscht sie temporär); Referenz-Prüfung läuft engine-seitig gegen das Read-Model.
+- **Event-Deklarationen sind nicht Teil der Schema-Checksum** — Event-Evolution läuft über Upcaster, nicht über `SchemaVersion` (kein Drift-Fehler bei neuer Event-Version).
+- **CloudEvents-Typ-Präfix:** Default ist der Package-Pfad des Models mit `/`→`.` (überschreibbar via `orm.EventTypePrefix`).
+- **Worker:** ein Goroutine-Loop pro Instanz (200-ms-Tick + Wake-Signal nach Append), verarbeitet Projektionen → Reaktoren → Snapshots; Fehler werden geschluckt und im nächsten Durchlauf erneut versucht (Checkpoints bleiben stehen — at-least-once). Lease-Koordination für Mehrinstanz-Betrieb kommt mit Phase 3/4.
+- **Bewusste Auslassungen:** keine zstd-Kompression der Snapshots (keine neue Dependency; Feld ist BLOB, Kompression kann später dazu), keine Archiv-Nebentabellen (Phase 4), `ondelete`-Aktionen auf ES-Ziele lösen noch kein Lösch-Event aus (Phase 3), Worker-Fehler sind nicht beobachtbar (Observability-API kommt in Phase 5), `Watch` ohne Tenant im Context liefert einen sofort geschlossenen Kanal (Signatur hat keinen Fehlerkanal — fail-closed).
 
 ## Phase-1-Arbeitsplan (Reihenfolge)
 

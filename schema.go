@@ -26,18 +26,49 @@ func (d *DB) applySchema(ctx context.Context) error {
 					return fmt.Errorf("orm: %s anlegen: %w (%s)", m.table, err, stmt)
 				}
 			}
+		} else {
+			have := map[string]bool{}
+			for _, c := range existing {
+				have[c] = true
+			}
+			for _, f := range m.fields {
+				if !have[f.column] {
+					ddl := columnDDL(f, false)
+					if m.kind == kindEventSourced {
+						ddl = esColumnDDL(f)
+					}
+					stmt := fmt.Sprintf("ALTER TABLE %q ADD COLUMN %s", m.table, ddl)
+					if _, err := d.sql.ExecContext(ctx, stmt); err != nil {
+						return fmt.Errorf("orm: Spalte %s.%s ergänzen: %w", m.table, f.column, err)
+					}
+				}
+			}
+		}
+		if m.kind == kindEventSourced {
+			if err := d.ensureESTables(ctx, m); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ensureESTables legt Event-Log und Snapshot-Tabelle eines ES-Models an.
+func (d *DB) ensureESTables(ctx context.Context, m *model) error {
+	for table, stmts := range map[string][]string{
+		esEventsTable(m): esEventsSQL(m),
+		esSnapsTable(m):  esSnapshotsSQL(m),
+	} {
+		existing, err := d.dial.tableColumns(d.sql, table)
+		if err != nil {
+			return fmt.Errorf("orm: Schema von %s lesen: %w", table, err)
+		}
+		if len(existing) > 0 {
 			continue
 		}
-		have := map[string]bool{}
-		for _, c := range existing {
-			have[c] = true
-		}
-		for _, f := range m.fields {
-			if !have[f.column] {
-				stmt := fmt.Sprintf("ALTER TABLE %q ADD COLUMN %s", m.table, columnDDL(f, false))
-				if _, err := d.sql.ExecContext(ctx, stmt); err != nil {
-					return fmt.Errorf("orm: Spalte %s.%s ergänzen: %w", m.table, f.column, err)
-				}
+		for _, stmt := range stmts {
+			if _, err := d.sql.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("orm: %s anlegen: %w (%s)", table, err, stmt)
 			}
 		}
 	}
@@ -46,6 +77,9 @@ func (d *DB) applySchema(ctx context.Context) error {
 
 // createTableSQL erzeugt CREATE TABLE + Indizes für ein Model.
 func createTableSQL(m *model) []string {
+	if m.kind == kindEventSourced {
+		return esReadModelSQL(m)
+	}
 	var cols []string
 	var constraints []string
 
@@ -58,17 +92,23 @@ func createTableSQL(m *model) []string {
 	cols = append(cols, `geo TEXT NOT NULL DEFAULT 'local'`)
 
 	for _, f := range m.fields {
-		if f.ref != nil {
+		// Kein FK auf ES-Read-Models: deren Zeilen sind rebuildbare Artefakte
+		// (RebuildProjection löscht sie temporär) — Prüfung nur engine-seitig.
+		if f.ref != nil && f.ref.kind != kindEventSourced {
 			constraints = append(constraints, fmt.Sprintf(
 				"FOREIGN KEY (%q) REFERENCES %q (%q) ON DELETE %s",
-				f.column, f.ref.table, f.ref.pk.column, f.refOn.sql()))
+				f.column, f.ref.table, f.ref.pkColumn(), f.refOn.sql()))
 		}
 	}
 
 	stmts := []string{fmt.Sprintf("CREATE TABLE %q (\n  %s\n)", m.table,
 		strings.Join(append(cols, constraints...), ",\n  "))}
+	return append(stmts, indexStmts(m)...)
+}
 
-	// Einzelfeld-Indizes aus Tags:
+// indexStmts erzeugt die Index-DDL eines Models (Tags + Model-Optionen).
+func indexStmts(m *model) []string {
+	var stmts []string
 	for _, f := range m.fields {
 		switch {
 		case f.unique:
@@ -78,7 +118,6 @@ func createTableSQL(m *model) []string {
 				fmt.Sprintf("ix_%s_%s", m.table, f.column), m.table, quoteAll(f.column)))
 		}
 	}
-	// Zusammengesetzte Constraints aus Model-Optionen:
 	for _, set := range m.opts.uniques {
 		stmts = append(stmts, uniqueIndexSQL(m, columnsOf(m, set)))
 	}
@@ -88,6 +127,68 @@ func createTableSQL(m *model) []string {
 			fmt.Sprintf("ix_%s_%s", m.table, strings.Join(cols, "_")), m.table, quoteAll(cols...)))
 	}
 	return stmts
+}
+
+// esReadModelSQL erzeugt das Read-Model eines ES-Models: implizite "id" als
+// PK, die Struct-Spalten ohne NOT-NULL/CHECK (Validierung ist Sache von
+// Apply — die Zeile ist ein Projektions-Artefakt), plus aggregate_seq.
+func esReadModelSQL(m *model) []string {
+	cols := []string{`"id" TEXT PRIMARY KEY`}
+	for _, f := range m.fields {
+		cols = append(cols, esColumnDDL(f))
+	}
+	if m.tenanted() {
+		cols = append(cols, `tenant_id TEXT NOT NULL REFERENCES ormpp_tenants (tenant_id)`)
+	}
+	cols = append(cols,
+		`geo TEXT NOT NULL DEFAULT 'local'`,
+		`"aggregate_seq" INTEGER NOT NULL DEFAULT 0`)
+	stmts := []string{fmt.Sprintf("CREATE TABLE %q (\n  %s\n)", m.table, strings.Join(cols, ",\n  "))}
+	return append(stmts, indexStmts(m)...)
+}
+
+func esColumnDDL(f *field) string {
+	return fmt.Sprintf("%q %s", f.column, sqlType(f))
+}
+
+// esEventsSQL erzeugt den Append-only-Event-Log eines ES-Models.
+func esEventsSQL(m *model) []string {
+	t := esEventsTable(m)
+	tenantCol := ""
+	if m.tenanted() {
+		tenantCol = "\n  \"tenant_id\" TEXT NOT NULL,"
+	}
+	return []string{
+		fmt.Sprintf(`CREATE TABLE %q (
+  "aggregate_id" TEXT NOT NULL,
+  "aggregate_seq" INTEGER NOT NULL,%s
+  "geo" TEXT NOT NULL,
+  "seq" INTEGER NOT NULL,
+  "event_id" TEXT NOT NULL,
+  "occurred_at" TEXT NOT NULL,
+  "type_id" INTEGER NOT NULL,
+  "data" TEXT NOT NULL,
+  PRIMARY KEY ("aggregate_id", "aggregate_seq")
+)`, t, tenantCol),
+		fmt.Sprintf("CREATE UNIQUE INDEX %q ON %q (%s)", "ux_"+t+"_geo_seq", t, quoteAll("geo", "seq")),
+	}
+}
+
+// esSnapshotsSQL erzeugt die Snapshot-Tabelle eines ES-Models. Nicht
+// append-only: KeepLast-Politik löscht ältere Stände.
+func esSnapshotsSQL(m *model) []string {
+	t := esSnapsTable(m)
+	tenantCol := ""
+	if m.tenanted() {
+		tenantCol = "\n  \"tenant_id\" TEXT NOT NULL,"
+	}
+	return []string{fmt.Sprintf(`CREATE TABLE %q (
+  "aggregate_id" TEXT NOT NULL,
+  "aggregate_seq" INTEGER NOT NULL,%s
+  "taken_at" TEXT NOT NULL,
+  "state" BLOB NOT NULL,
+  PRIMARY KEY ("aggregate_id", "aggregate_seq")
+)`, t, tenantCol)}
 }
 
 // uniqueIndexSQL bezieht tenant_id automatisch ein: Eindeutigkeit gilt pro Tenant.

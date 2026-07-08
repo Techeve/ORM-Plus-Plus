@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 )
 
@@ -32,6 +33,18 @@ type DB struct {
 	regions        map[string]bool // deklarierte Topologie; leer = implizit "local"
 	migrationsToDo []int           // registrierte MigrationTo-Versionen (Phase 3)
 	migrated       bool
+
+	// Event Sourcing (Phase 2):
+	esTypes   *typeDict                   // Typ-Wörterbuch, geladen bei Migrate
+	upcasters map[string]map[int]upcaster // Event-Name → fromVersion → Upcaster
+	reactorMu sync.Mutex
+	reactors  []*reactor
+	watchMu   sync.Mutex
+	watchers  map[*watcher]struct{}
+	wake      chan struct{} // weckt den Worker nach Append
+
+	workerCancel context.CancelFunc
+	workerWG     sync.WaitGroup
 }
 
 func (d *DB) db() *DB    { return d }
@@ -73,13 +86,23 @@ func Open(driver Driver, opts ...OpenOption) (*DB, error) {
 		reg:           newRegistry(),
 		schemaVersion: 1,
 		regions:       map[string]bool{},
+		upcasters:     map[string]map[int]upcaster{},
+		watchers:      map[*watcher]struct{}{},
+		wake:          make(chan struct{}, 1),
 	}
 	d.tenants = newTenantRegistry(d)
 	return d, nil
 }
 
-// Close schließt den Verbindungspool.
-func (d *DB) Close() error { return d.sql.Close() }
+// Close stoppt die Worker und schließt den Verbindungspool.
+func (d *DB) Close() error {
+	if d.workerCancel != nil {
+		d.workerCancel()
+		d.workerWG.Wait()
+		d.workerCancel = nil
+	}
+	return d.sql.Close()
+}
 
 // Register deklariert ein Model. Validierungsfehler werden gesammelt und
 // schlagen bei Migrate fehl (Register selbst hat laut API keinen Fehlerkanal).
@@ -130,6 +153,17 @@ func (d *DB) validGeo(geo string) bool {
 	return d.regions[geo]
 }
 
+// dataGeo löst das Daten-Geo aus dem Context auf (mit Topologie-Validierung).
+func (d *DB) dataGeo(ctx context.Context) (string, error) {
+	if g, ok := geoFrom(ctx); ok {
+		if !d.validGeo(g.home) {
+			return "", fmt.Errorf("%w: %q", ErrRegionNotActive, g.home)
+		}
+		return g.home, nil
+	}
+	return d.defaultGeo()
+}
+
 // defaultGeo liefert das Daten-Geo, wenn keins im Context steht.
 func (d *DB) defaultGeo() (string, error) {
 	if len(d.regions) == 0 {
@@ -169,9 +203,20 @@ func (d *DB) FinalizeMigration(ctx context.Context, version int) error {
 	return fmt.Errorf("orm: FinalizeMigration ist noch nicht implementiert (Phase 3): %w", ErrMigrationPending)
 }
 
-// StartWorkers startet die Hintergrund-Verarbeitung. In Phase 1 ein No-op
-// (Projektionen/Reaktoren kommen in Phase 2, Leases in Phase 2/3).
-func (d *DB) StartWorkers(ctx context.Context) error { return nil }
+// StartWorkers startet die Hintergrund-Verarbeitung dieser Instanz:
+// eingebaute Projektionen, OnEvent-Reaktoren und Snapshot-Erzeugung.
+// Auf SQLite trivial ein Prozess (Lease-Koordination kommt mit Phase 3/4).
+// ctx-Abbruch oder Close stoppt die Worker sauber.
+func (d *DB) StartWorkers(ctx context.Context) error {
+	if d.workerCancel != nil {
+		return nil
+	}
+	wctx, cancel := context.WithCancel(ctx)
+	d.workerCancel = cancel
+	d.workerWG.Add(1)
+	go d.workerLoop(wctx)
+	return nil
+}
 
 // Tenants liefert das eingebaute Tenant-Register.
 func (d *DB) Tenants() *TenantRegistry { return d.tenants }
@@ -202,11 +247,6 @@ func (d *DB) Migrate(ctx context.Context) error {
 	if err := d.reg.resolve(); err != nil {
 		return err
 	}
-	for _, m := range d.reg.ordered {
-		if m.kind == kindEventSourced {
-			return fmt.Errorf("orm: %s: EventSourced-Modelle sind noch nicht implementiert (Phase 2, siehe doc/TASK.md)", m.name)
-		}
-	}
 
 	if err := d.bootstrapSystemTables(ctx); err != nil {
 		return err
@@ -236,6 +276,12 @@ func (d *DB) Migrate(ctx context.Context) error {
 	if err := d.tenants.bootstrap(ctx); err != nil {
 		return err
 	}
+	if err := d.bootstrapEventTypes(ctx); err != nil {
+		return err
+	}
+	if err := d.validateUpcasters(); err != nil {
+		return err
+	}
 	d.migrated = true
 	return nil
 }
@@ -253,6 +299,16 @@ func (d *DB) bootstrapSystemTables(ctx context.Context) error {
 			name TEXT NOT NULL,
 			status TEXT NOT NULL CHECK (status IN ('active','archived')),
 			created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS ormpp_event_types (
+			type_id INTEGER PRIMARY KEY,
+			type TEXT NOT NULL UNIQUE
+		)`,
+		`CREATE TABLE IF NOT EXISTS ormpp_checkpoints (
+			consumer TEXT NOT NULL,
+			geo TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			PRIMARY KEY (consumer, geo)
 		)`,
 	}
 	for _, s := range stmts {

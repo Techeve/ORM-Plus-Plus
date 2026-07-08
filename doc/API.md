@@ -2,7 +2,7 @@
 
 Verbindliche Spezifikation der öffentlichen Go-API von ORM++. Dieses Dokument ist der Vertrag, gegen den implementiert wird; Abweichungen in der Implementierung sind Fehler oder müssen hier nachgezogen werden. Architektur-Hintergründe und physisches Schema: siehe [ROADMAP.md](ROADMAP.md).
 
-**Status:** Design abgeschlossen, Implementierung ausstehend. Import-Pfad:
+**Status:** Phase 1 (CRUD) und Phase 2 (Event Sourcing) auf SQLite implementiert. Import-Pfad:
 
 ```go
 import orm "gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
@@ -567,6 +567,8 @@ Alle Funktionen existieren durch die `orm.Aggregate`-Einbettung von Haus aus und
 ```go
 zone.ID()          zone.Version()          zone.UpdatedAt()
 
+// AtVersion/AtTime liefern ein neues Objekt des Model-Typs (statisch `any`,
+// da Go keine generischen Methoden kennt — bei Bedarf auf *DNSZone casten):
 old, err := zone.AtVersion(ctx, 42)         // Zustand nach Event 42
 old, err  = zone.AtTime(ctx, timestamp)     // Zustand zu einem Zeitpunkt
 
@@ -596,10 +598,11 @@ orm.OnEvent[DNSZone](db, "zone.*",
     func(ctx context.Context, ce orm.CloudEvent, tx orm.Tx) error {
         return updateZoneDashboardView(ctx, tx, ce)   // läuft transaktional
     },
+    orm.Named("zone-dashboard"),   // stabiler Name für Checkpoint & RebuildView
 )
 ```
 
-Handler müssen **idempotent** sein (at-least-once). Muster: Event-ID in der Ziel-View mitschreiben und Duplikate ignorieren.
+Handler müssen **idempotent** sein (at-least-once). Muster: Event-ID in der Ziel-View mitschreiben und Duplikate ignorieren. `orm.Named` gibt dem Konsumenten einen stabilen Namen (Checkpoint-Schlüssel, `RebuildView`-Referenz); ohne Angabe wird Model-Name + Pattern verwendet.
 
 **`Watch` — der schnelle Pfad.** Flüchtige Live-Benachrichtigung an verbundene Clients (SSE/WebSocket); wer nicht zuhört, verpasst nichts Dauerhaftes:
 

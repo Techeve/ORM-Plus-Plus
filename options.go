@@ -80,6 +80,7 @@ type modelOptions struct {
 	writeForward bool
 	uniques      [][]string
 	indexes      [][]string
+	events       []EventDecl
 
 	snapshotEvery    int
 	snapshotMaxAge   time.Duration

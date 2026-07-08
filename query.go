@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -79,6 +80,15 @@ type QueryBuilder[T any] interface {
 	Exists() (bool, error)
 	UpdateSet(sets ...Assignment) (int64, error)
 	Delete() (int64, error)
+}
+
+// Query baut eine typisierte Abfrage — für CRUD-Modelle wie für die
+// Read-Models von ES-Modellen (dort inkl. Aggregat-Verdrahtung im Ergebnis).
+func Query[T any](h Handle, ctx context.Context) QueryBuilder[T] {
+	return &queryBuilder[T]{
+		r:   &repo[T]{h: h, m: h.db().reg.models[reflect.TypeFor[T]()]},
+		ctx: ctx,
+	}
 }
 
 type orderTerm struct {
@@ -263,7 +273,7 @@ func (q *queryBuilder[T]) All() ([]*T, error) {
 	if err != nil {
 		return nil, err
 	}
-	return scanModelRows[T](q.r.m, rows)
+	return scanModelRows[T](q.r.h, q.r.m, rows)
 }
 
 func (q *queryBuilder[T]) Iter() iter.Seq2[*T, error] {
@@ -281,7 +291,7 @@ func (q *queryBuilder[T]) Iter() iter.Seq2[*T, error] {
 		}
 		defer rows.Close()
 		for rows.Next() {
-			e, err := scanModelRow[T](q.r.m, rows)
+			e, err := scanModelRow[T](q.r.h, q.r.m, rows)
 			if !yield(e, err) || err != nil {
 				return
 			}

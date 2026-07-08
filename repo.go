@@ -38,6 +38,9 @@ func (r *repo[T]) scope(ctx context.Context) (tenant ID, geo string, err error) 
 	if r.m == nil {
 		return ID{}, "", fmt.Errorf("orm: Model %T ist nicht registriert", *new(T))
 	}
+	if r.m.kind == kindEventSourced {
+		return ID{}, "", fmt.Errorf("orm: %s ist event-sourced — orm.New/orm.Load/Append statt CRUD-Repository verwenden", r.m.name)
+	}
 	if r.m.tenanted() {
 		t, ok := tenantFrom(ctx)
 		if !ok {
@@ -45,16 +48,9 @@ func (r *repo[T]) scope(ctx context.Context) (tenant ID, geo string, err error) 
 		}
 		tenant = t
 	}
-	if g, ok := geoFrom(ctx); ok {
-		if !d.validGeo(g.home) {
-			return ID{}, "", fmt.Errorf("%w: %q", ErrRegionNotActive, g.home)
-		}
-		geo = g.home
-	} else {
-		geo, err = d.defaultGeo()
-		if err != nil {
-			return ID{}, "", err
-		}
+	geo, err = d.dataGeo(ctx)
+	if err != nil {
+		return ID{}, "", err
 	}
 	return tenant, geo, nil
 }
@@ -131,7 +127,7 @@ func (r *repo[T]) checkRef(ctx context.Context, f *field, fv reflect.Value, tena
 		}
 		return nil
 	}
-	query := fmt.Sprintf("SELECT 1 FROM %q WHERE %q = ?", f.ref.table, f.ref.pk.column)
+	query := fmt.Sprintf("SELECT 1 FROM %q WHERE %q = ?", f.ref.table, f.ref.pkColumn())
 	args := []any{target.String()}
 	if f.ref.tenanted() {
 		query += ` AND tenant_id = ?`
@@ -204,7 +200,7 @@ func (r *repo[T]) get(ctx context.Context, id ID) (*T, error) {
 	if err != nil {
 		return nil, err
 	}
-	list, err := scanModelRows[T](r.m, rows)
+	list, err := scanModelRows[T](r.h, r.m, rows)
 	if err != nil {
 		return nil, err
 	}
@@ -407,6 +403,9 @@ func selectList(m *model) string {
 	cols := make([]string, len(m.fields))
 	for i, f := range m.fields {
 		cols[i] = f.column
+	}
+	if m.kind == kindEventSourced {
+		cols = append(cols, "id", "aggregate_seq")
 	}
 	return quoteAll(cols...)
 }

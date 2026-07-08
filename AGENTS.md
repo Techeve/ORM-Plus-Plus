@@ -8,7 +8,7 @@ korrekt auf diesem Projekt arbeiten zu können. Vor dem ersten Tool-Call hier le
 **Name:** ORM++
 **Import-Pfad:** `gitlab.techeve.de/orm-plus-plus/orm-plus-plus`
 **Go-Version:** 1.26
-**Status:** Phase 1 (CRUD/SQLite) abgeschlossen ✅ — Phase 2 (Event Sourcing) als Nächstes.
+**Status:** Phase 1 (CRUD) + Phase 2 (Event Sourcing) auf SQLite abgeschlossen ✅ — Phase 3 (Migrations-Engine) als Nächstes.
 
 ORM++ ist eine Go-Library für model-first Persistenz: klassisches ORM-Mapping **plus**
 Event Sourcing, Projektionen, Snapshots und Expand/Contract-Migrationen — optimiert für
@@ -45,7 +45,7 @@ DB-Details.
 
 ## 4. Implementierungsstand
 
-### Phase 1 — CRUD auf SQLite ✅ (17 Tests, CI-Pipeline grün)
+### Phase 1 (CRUD) + Phase 2 (Event Sourcing) auf SQLite ✅ (30 Tests, CI grün)
 
 | Datei | Inhalt |
 |---|---|
@@ -54,29 +54,36 @@ DB-Details.
 | `errors.go` | Alle Sentinel-Fehler (`ErrNotFound`, `ErrNoTenant`, …) |
 | `context.go` | `WithTenant`, `WithGeo`, `ReplicateTo`, `ReplicateAll` |
 | `options.go` | Alle Option-Typen: `OpenOption`, `ModelMode`, `ModelOption`, `BatchOption`, `Role` |
-| `registry.go` | Tag-Parsing, Validierung, Referenzauflösung, Topo-Sort für FK-DDL, SHA-256-Checksum |
+| `registry.go` | Tag-Parsing, Validierung (inkl. ES: Aggregate-Einbettung, Apply), Referenzauflösung, Topo-Sort, Checksum |
 | `driver.go` | `Driver`-Interface, `dialect`-Interface, `Postgres`/`Yugabyte` Stubs (Phase 4) |
 | `sqlite.go` | SQLite-Treiber: WAL, FK, txlock=immediate, MaxOpenConns=1 (modernc.org/sqlite) |
-| `db.go` | `DB`-Struct, `Open`, `Register[T]`, `Migrate`, `Tx`, `Topology`, `Tenants` |
-| `schema.go` | DDL-Generierung, `applySchema`, additiver Diff (ALTER TABLE ADD COLUMN) |
-| `values.go` | Typ-Konversionen: `encodeField`, `decodeField`, `scanModelRows[T]` |
-| `tenants.go` | `TenantRegistry`: Create/Get/List/Archive + In-Memory-Cache + Insert-Verifikation |
-| `repo.go` | `Repository[T]`: Insert/InsertMany/Get/GetForUpdate/Update/Upsert/Delete |
-| `query.go` | `QueryBuilder[T]`: Cond-Baum, All/Iter/First/Count/Exists/UpdateSet/Delete |
+| `db.go` | `DB`-Struct, `Open`, `Register[T]`, `Migrate`, `Tx`, `Topology`, `Tenants`, `StartWorkers`/`Close` |
+| `schema.go` | DDL-Generierung (CRUD + ES-Read-Model/Events/Snapshots), additiver Diff |
+| `values.go` | Typ-Konversionen, `scanModelRows[T]` (inkl. Aggregat-Verdrahtung bei ES) |
+| `tenants.go` | `TenantRegistry`: Create/Get/List/Archive + Cache + Insert-Verifikation |
+| `repo.go` | `Repository[T]` (CRUD; auf ES-Modellen gesperrt) |
+| `query.go` | `QueryBuilder[T]` + freies `orm.Query[T]` (läuft auch gegen ES-Read-Models) |
+| `event.go` | `Event`, `CloudEvent`, `Position`, `Events`/`E`/`V`, Typ-Wörterbuch (`ormpp_event_types`) |
+| `aggregate.go` | `orm.Aggregate`: `New`/`Load`/`Append`/`Refresh`/`AtVersion`/`AtTime`/`History`, Fold-Kern |
+| `upcast.go` | `orm.Upcast`, Dekodierung mit Upcaster-Kette, Migrate-Validierung |
+| `projection.go` | Worker-Loop, Checkpoints, eingebaute Projektion, `OnEvent`/`Named`, Snapshots, `RebuildProjection`/`RebuildView`, WaitFor |
+| `stream.go` | `Stream`, `Watch`, In-Process-Live-Hub |
 | `migration.go` | `ReplaceModel[Old,New]` Stub (Phase 3) |
+
+Tests: `crud_test.go` (Phase 1), `es_test.go` (Phase 2) — laufen später unverändert gegen PG/YB.
 
 ### Absichtliche Stubs (existieren als API, noch nicht implementiert)
 
 | API | Fehler / Verhalten | Geplant |
 |---|---|---|
-| `orm.EventSourced()` | `Migrate` lehnt ES-Modelle ab | Phase 2 |
-| `repo.SetGeo` | gibt Fehler zurück | Phase 2/3 |
+| `repo.SetGeo` | gibt Fehler zurück | Phase 3 |
 | `Tenants().Export` | gibt Fehler zurück | Phase 5 |
 | `Tenants().Purge` | gibt Fehler zurück | Phase 5 |
-| `StartWorkers` | No-op | Phase 2 |
 | `FinalizeMigration` | gibt Fehler zurück | Phase 3 |
 | `Postgres`/`Yugabyte` Driver | gibt Fehler zurück | Phase 4 |
 | `encrypted`-Tag | Registrierungsfehler | Phase 3/5 |
+| Archiv-Tabellen, Snapshot-Kompression | Events bleiben im Hot-Log, Snapshots unkomprimiert | Phase 4 |
+| Lease-Koordination der Worker | ein Prozess = ein Worker-Loop | Phase 3/4 |
 
 ## 5. Coding-Konventionen
 
@@ -132,8 +139,8 @@ PostgreSQL und YugabyteDB. Keine backend-spezifischen Assertions einbauen.
 |---|---|---|
 | 0 | Repo, CI, Branch-Schutz, API.md, ROADMAP.md | ✅ |
 | 1 | CRUD auf SQLite, Model-Registry, Schema, Tenants (17 Tests) | ✅ |
-| 2 | Event Sourcing: `orm.EventSourced`, `orm.Aggregate`, Append, OnEvent/Watch, Snapshots | ⏳ nächste |
-| 3 | Migrations-Engine: Expand/Contract, Dual-Write, Backfill-Worker | — |
+| 2 | Event Sourcing: `orm.Aggregate`, Append, Projektion, OnEvent/Watch, Upcaster, Snapshots, WaitFor (12 Tests) | ✅ |
+| 3 | Migrations-Engine: Expand/Contract, Dual-Write, Backfill-Worker | ⏳ nächste |
 | 4 | PostgreSQL- und YugabyteDB-Adapter | — |
 | 5 | v1.0-Härtung: Encryption, Export/Purge, MigrationStatus/Health | — |
 
