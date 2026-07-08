@@ -25,7 +25,8 @@ test:
   image: golang:1.26
   <<: *go-cache
   script:
-    - test -z "$(gofmt -l .)" || { echo "Nicht gofmt-konform:"; gofmt -l .; exit 1; }
+    # Nur getrackte Dateien prüfen — der Go-Cache liegt als .go/ im Projektverzeichnis.
+    - FILES=$(git ls-files '*.go'); test -z "$(gofmt -l $FILES)" || { echo "Nicht gofmt-konform:"; gofmt -l $FILES; exit 1; }
     - go vet ./...
     - go test -race -coverprofile=coverage.txt -covermode=atomic ./...
     - go tool cover -func=coverage.txt | tail -n 1
