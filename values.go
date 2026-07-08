@@ -8,9 +8,61 @@ import (
 	"time"
 )
 
+// decKind ist die beim Registrieren kompilierte Kodierungsart eines Feldes.
+// Der Hot Path (encode/decode pro Zeile) macht damit nur noch einen
+// Integer-Switch — kein Interface-Boxing, um den Typ zu erraten.
+type decKind int
+
+const (
+	dOther decKind = iota // Fallback über database/sql-Konvertierung
+	dJSON
+	dEncrypted
+	dID
+	dTime
+	dString
+	dBool
+	dInt
+	dUint
+	dFloat
+	dBytes
+)
+
+func decKindOf(f *field) decKind {
+	if f.json {
+		return dJSON
+	}
+	if f.encrypted {
+		return dEncrypted
+	}
+	t := f.goType
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch {
+	case t == idType:
+		return dID
+	case t == timeType:
+		return dTime
+	case t.Kind() == reflect.String:
+		return dString
+	case t.Kind() == reflect.Bool:
+		return dBool
+	case t.Kind() >= reflect.Int && t.Kind() <= reflect.Int64:
+		return dInt
+	case t.Kind() >= reflect.Uint && t.Kind() <= reflect.Uint64:
+		return dUint
+	case t.Kind() == reflect.Float32 || t.Kind() == reflect.Float64:
+		return dFloat
+	case t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8:
+		return dBytes
+	default:
+		return dOther
+	}
+}
+
 // encodeField wandelt einen Go-Feldwert in einen Treiberwert.
 func encodeField(d *DB, f *field, v reflect.Value) (any, error) {
-	if f.json {
+	if f.dk == dJSON {
 		b, err := json.Marshal(v.Interface())
 		if err != nil {
 			return nil, fmt.Errorf("orm: %s als JSON: %w", f.name, err)
@@ -23,32 +75,42 @@ func encodeField(d *DB, f *field, v reflect.Value) (any, error) {
 		}
 		v = v.Elem()
 	}
-	if f.encrypted {
+	switch f.dk {
+	case dEncrypted:
 		var plain []byte
-		switch val := v.Interface().(type) {
-		case string:
-			plain = []byte(val)
-		case []byte:
-			plain = val
+		if v.Kind() == reflect.String {
+			plain = []byte(v.String())
+		} else {
+			plain = v.Bytes()
 		}
 		return encryptValue(d.opts.keys, plain)
-	}
-	switch val := v.Interface().(type) {
-	case ID:
-		if val.IsZero() {
+	case dID:
+		id := v.Interface().(ID)
+		if id.IsZero() {
 			return nil, nil
 		}
-		return val.String(), nil
-	case time.Time:
-		if val.IsZero() {
+		return id.String(), nil
+	case dTime:
+		t := v.Interface().(time.Time)
+		if t.IsZero() {
 			return nil, nil
 		}
-		return val.UTC().Format(time.RFC3339Nano), nil
-	case bool:
-		if val {
+		return t.UTC().Format(time.RFC3339Nano), nil
+	case dString:
+		return v.String(), nil
+	case dBool:
+		if v.Bool() {
 			return int64(1), nil
 		}
 		return int64(0), nil
+	case dInt:
+		return v.Int(), nil
+	case dUint:
+		return int64(v.Uint()), nil
+	case dFloat:
+		return v.Float(), nil
+	case dBytes:
+		return v.Bytes(), nil
 	default:
 		return v.Interface(), nil
 	}
@@ -56,7 +118,7 @@ func encodeField(d *DB, f *field, v reflect.Value) (any, error) {
 
 // decodeField schreibt einen Treiberwert zurück in ein Go-Feld.
 func decodeField(d *DB, f *field, target reflect.Value, raw any) error {
-	if f.json {
+	if f.dk == dJSON {
 		if raw == nil {
 			target.SetZero()
 			return nil
@@ -85,7 +147,8 @@ func decodeField(d *DB, f *field, target reflect.Value, raw any) error {
 		return nil
 	}
 
-	if f.encrypted {
+	switch f.dk {
+	case dEncrypted:
 		blob, ok := raw.([]byte)
 		if !ok {
 			return fmt.Errorf("orm: encrypted-Spalte %s: %T statt BLOB", f.column, raw)
@@ -99,18 +162,12 @@ func decodeField(d *DB, f *field, target reflect.Value, raw any) error {
 		} else {
 			target.SetBytes(plain)
 		}
-		return nil
-	}
-
-	switch target.Interface().(type) {
-	case ID:
-		var id ID
+	case dID:
+		id := target.Addr().Interface().(*ID)
 		if err := id.Scan(raw); err != nil {
 			return err
 		}
-		target.Set(reflect.ValueOf(id))
-		return nil
-	case time.Time:
+	case dTime:
 		s, ok := rawString(raw)
 		if !ok {
 			return fmt.Errorf("orm: Zeit-Spalte %s: unerwarteter Typ %T", f.column, raw)
@@ -119,36 +176,32 @@ func decodeField(d *DB, f *field, target reflect.Value, raw any) error {
 		if err != nil {
 			return err
 		}
-		target.Set(reflect.ValueOf(t))
-		return nil
-	}
-
-	switch target.Kind() {
-	case reflect.String:
+		*(target.Addr().Interface().(*time.Time)) = t
+	case dString:
 		s, ok := rawString(raw)
 		if !ok {
 			return fmt.Errorf("orm: Spalte %s: %T statt String", f.column, raw)
 		}
 		target.SetString(s)
-	case reflect.Bool:
+	case dBool:
 		n, ok := rawInt(raw)
 		if !ok {
 			return fmt.Errorf("orm: Spalte %s: %T statt Bool", f.column, raw)
 		}
 		target.SetBool(n != 0)
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+	case dInt:
 		n, ok := rawInt(raw)
 		if !ok {
 			return fmt.Errorf("orm: Spalte %s: %T statt Integer", f.column, raw)
 		}
 		target.SetInt(n)
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+	case dUint:
 		n, ok := rawInt(raw)
 		if !ok {
 			return fmt.Errorf("orm: Spalte %s: %T statt Integer", f.column, raw)
 		}
 		target.SetUint(uint64(n))
-	case reflect.Float32, reflect.Float64:
+	case dFloat:
 		switch v := raw.(type) {
 		case float64:
 			target.SetFloat(v)
@@ -157,7 +210,7 @@ func decodeField(d *DB, f *field, target reflect.Value, raw any) error {
 		default:
 			return fmt.Errorf("orm: Spalte %s: %T statt Float", f.column, raw)
 		}
-	case reflect.Slice: // []byte
+	case dBytes:
 		b, ok := raw.([]byte)
 		if !ok {
 			return fmt.Errorf("orm: Spalte %s: %T statt BLOB", f.column, raw)
@@ -195,11 +248,21 @@ func rawInt(raw any) (int64, bool) {
 }
 
 // scanModelRows liest alle Zeilen eines *sql.Rows in Model-Instanzen.
+// Die Scan-Puffer werden über die Zeilen hinweg wiederverwendet.
 func scanModelRows[T any](h Handle, m *model, rows *sql.Rows) ([]*T, error) {
 	defer rows.Close()
+	n := len(m.fields)
+	if m.kind == kindEventSourced {
+		n += 2 // id, aggregate_seq (siehe selectList)
+	}
+	raws := make([]any, n)
+	ptrs := make([]any, n)
+	for i := range raws {
+		ptrs[i] = &raws[i]
+	}
 	var out []*T
 	for rows.Next() {
-		e, err := scanModelRow[T](h, m, rows)
+		e, err := scanModelRowInto[T](h, m, rows, raws, ptrs)
 		if err != nil {
 			return nil, err
 		}
@@ -211,13 +274,17 @@ func scanModelRows[T any](h Handle, m *model, rows *sql.Rows) ([]*T, error) {
 func scanModelRow[T any](h Handle, m *model, rows *sql.Rows) (*T, error) {
 	n := len(m.fields)
 	if m.kind == kindEventSourced {
-		n += 2 // id, aggregate_seq (siehe selectList)
+		n += 2
 	}
 	raws := make([]any, n)
 	ptrs := make([]any, n)
 	for i := range raws {
 		ptrs[i] = &raws[i]
 	}
+	return scanModelRowInto[T](h, m, rows, raws, ptrs)
+}
+
+func scanModelRowInto[T any](h Handle, m *model, rows *sql.Rows, raws, ptrs []any) (*T, error) {
 	if err := rows.Scan(ptrs...); err != nil {
 		return nil, err
 	}
