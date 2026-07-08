@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"reflect"
 	"sync"
 	"time"
@@ -29,10 +30,17 @@ type DB struct {
 	reg     *registry
 	tenants *TenantRegistry
 
-	schemaVersion  int
-	regions        map[string]bool // deklarierte Topologie; leer = implizit "local"
-	migrationsToDo []int           // registrierte MigrationTo-Versionen (Phase 3)
-	migrated       bool
+	schemaVersion int
+	regions       map[string]bool // deklarierte Topologie; leer = implizit "local"
+	migrated      bool
+
+	// Migration (Phase 3):
+	instanceID    ID
+	hostname      string
+	migrations    map[int][]MigrationStep // Version → Schritte (MigrationTo)
+	dwMu          sync.Mutex
+	activeReplace map[string]*compiledReplace // Alt-Tabelle → Schritt (Dual-Write-Drain)
+	lastBeat      time.Time                   // nur vom Worker-Goroutine benutzt
 
 	// Event Sourcing (Phase 2):
 	esTypes   *typeDict                   // Typ-Wörterbuch, geladen bei Migrate
@@ -79,6 +87,7 @@ func Open(driver Driver, opts ...OpenOption) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	host, _ := os.Hostname()
 	d := &DB{
 		sql:           sdb,
 		dial:          dial,
@@ -89,17 +98,24 @@ func Open(driver Driver, opts ...OpenOption) (*DB, error) {
 		upcasters:     map[string]map[int]upcaster{},
 		watchers:      map[*watcher]struct{}{},
 		wake:          make(chan struct{}, 1),
+		instanceID:    NewID(),
+		hostname:      host,
+		migrations:    map[int][]MigrationStep{},
 	}
 	d.tenants = newTenantRegistry(d)
 	return d, nil
 }
 
-// Close stoppt die Worker und schließt den Verbindungspool.
+// Close stoppt die Worker, meldet die Instanz im Register ab (Leases werden
+// freigegeben) und schließt den Verbindungspool.
 func (d *DB) Close() error {
 	if d.workerCancel != nil {
 		d.workerCancel()
 		d.workerWG.Wait()
 		d.workerCancel = nil
+	}
+	if d.migrated {
+		d.deregisterInstance(bgCtx())
 	}
 	return d.sql.Close()
 }
@@ -177,32 +193,6 @@ func (d *DB) defaultGeo() (string, error) {
 	return "", ErrNoGeo
 }
 
-// MigrationTo registriert Migrationsschritte zu einer Version (Phase 3:
-// Schritte werden noch nicht ausgeführt; die Registrierung ist vorbereitet).
-func MigrationTo(d *DB, version int, steps ...MigrationStep) {
-	d.migrationsToDo = append(d.migrationsToDo, version)
-}
-
-// MigrationStep ist ein Schritt einer versionierten Migration.
-type MigrationStep interface{ migrationStep() }
-
-// Batch liefert einem BatchScript Zeilen häppchenweise (Phase 3).
-type Batch struct{}
-
-type batchScript struct{ name string }
-
-func (batchScript) migrationStep() {}
-
-// BatchScript deklariert ein freies Batch-Migrationsskript (Phase 3).
-func BatchScript(name string, fn func(ctx context.Context, b Batch) error) MigrationStep {
-	return batchScript{name: name}
-}
-
-// FinalizeMigration schließt eine Migration ab (Phase 3).
-func (d *DB) FinalizeMigration(ctx context.Context, version int) error {
-	return fmt.Errorf("orm: FinalizeMigration ist noch nicht implementiert (Phase 3): %w", ErrMigrationPending)
-}
-
 // StartWorkers startet die Hintergrund-Verarbeitung dieser Instanz:
 // eingebaute Projektionen, OnEvent-Reaktoren und Snapshot-Erzeugung.
 // Auf SQLite trivial ein Prozess (Lease-Koordination kommt mit Phase 3/4).
@@ -241,38 +231,60 @@ func (d *DB) Tx(ctx context.Context, fn func(tx Tx) error) error {
 	return stx.Commit()
 }
 
-// Migrate validiert die Registry, bootstrapt Systemtabellen, prüft
-// Version/Drift und wendet den additiven Schema-Diff an.
-func (d *DB) Migrate(ctx context.Context) error {
+// Migrate validiert die Registry, bootstrapt Systemtabellen, registriert die
+// Instanz und bringt das Schema auf die deklarierte Version: Erstinstallation
+// direkt, gleiche Version als No-op (mit Drift-Prüfung), höhere Version über
+// die Online-Zustandsmaschine expanding → backfill → dual-write. Der
+// Abschluss (Contract) ist explizit: FinalizeMigration.
+func (d *DB) Migrate(ctx context.Context, plans ...MigrationPlan) error {
+	plan := MigrationPlan{BatchSize: 1000}
+	if len(plans) > 0 {
+		plan = plans[0]
+		if plan.BatchSize <= 0 {
+			plan.BatchSize = 1000
+		}
+	}
 	if err := d.reg.resolve(); err != nil {
 		return err
 	}
-
 	if err := d.bootstrapSystemTables(ctx); err != nil {
 		return err
 	}
+	if err := d.registerInstance(ctx); err != nil {
+		return err
+	}
 
-	storedVersion, storedChecksum, err := d.readSchemaState(ctx)
+	st, err := d.readSchemaState(ctx)
 	if err != nil {
 		return err
 	}
 	sum := d.reg.checksum()
 
 	switch {
-	case storedVersion == 0:
-		// Erstinstallation.
-	case d.schemaVersion < storedVersion:
-		return fmt.Errorf("orm: deklarierte SchemaVersion %d ist älter als DB-Stand %d", d.schemaVersion, storedVersion)
-	case sum != storedChecksum && d.schemaVersion == storedVersion:
-		return fmt.Errorf("%w (DB-Stand v%d)", ErrSchemaDrift, storedVersion)
+	case st.current == 0:
+		// Erstinstallation: direkt auf die deklarierte Version, keine Schritte.
+		if err := d.applySchema(ctx); err != nil {
+			return err
+		}
+		if err := d.writeSchemaState(ctx, d.sql, schemaState{
+			current: d.schemaVersion, phase: phaseIdle, checksum: sum,
+		}); err != nil {
+			return err
+		}
+	case d.schemaVersion < st.current:
+		return fmt.Errorf("orm: deklarierte SchemaVersion %d ist älter als DB-Stand %d", d.schemaVersion, st.current)
+	case d.schemaVersion == st.current:
+		if sum != st.checksum {
+			return fmt.Errorf("%w (DB-Stand v%d)", ErrSchemaDrift, st.current)
+		}
+		// Idempotenter No-op — auch für Alt-Instanzen während einer laufenden
+		// Migration einer neueren Generation.
+	default:
+		if err := d.runUpgrade(ctx, st, plan); err != nil {
+			return err
+		}
 	}
 
-	if err := d.applySchema(ctx); err != nil {
-		return err
-	}
-	if err := d.writeSchemaState(ctx, d.schemaVersion, sum); err != nil {
-		return err
-	}
 	if err := d.tenants.bootstrap(ctx); err != nil {
 		return err
 	}
@@ -291,8 +303,57 @@ func (d *DB) bootstrapSystemTables(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS ormpp_schema_state (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			schema_version INTEGER NOT NULL,
+			target_version INTEGER NOT NULL DEFAULT 0,
+			phase TEXT NOT NULL DEFAULT 'idle',
 			models_checksum TEXT NOT NULL,
 			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS ormpp_schema_history (
+			id INTEGER PRIMARY KEY,
+			version INTEGER NOT NULL,
+			phase_from TEXT NOT NULL,
+			phase_to TEXT NOT NULL,
+			applied_at TEXT NOT NULL,
+			applied_by TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS ormpp_instances (
+			instance_id TEXT PRIMARY KEY,
+			hostname TEXT NOT NULL,
+			geo TEXT NOT NULL,
+			migration_role INTEGER NOT NULL,
+			app_version TEXT NOT NULL,
+			schema_version INTEGER NOT NULL,
+			started_at TEXT NOT NULL,
+			last_heartbeat TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS ormpp_leases (
+			name TEXT PRIMARY KEY,
+			holder TEXT NOT NULL,
+			fencing_token INTEGER NOT NULL,
+			expires_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS ormpp_deprecated (
+			model TEXT NOT NULL,
+			column_name TEXT NOT NULL,
+			deprecated_in INTEGER NOT NULL,
+			PRIMARY KEY (model, column_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS ormpp_migration_progress (
+			version INTEGER NOT NULL,
+			step TEXT NOT NULL,
+			geo TEXT NOT NULL,
+			last_key TEXT NOT NULL DEFAULT '',
+			rows_done INTEGER NOT NULL DEFAULT 0,
+			state TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (version, step, geo)
+		)`,
+		`CREATE TABLE IF NOT EXISTS ormpp_dualwrite_queue (
+			id INTEGER PRIMARY KEY,
+			tbl TEXT NOT NULL,
+			pk TEXT NOT NULL,
+			op TEXT NOT NULL,
+			changed_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS ormpp_tenants (
 			tenant_id TEXT PRIMARY KEY,
@@ -316,27 +377,24 @@ func (d *DB) bootstrapSystemTables(ctx context.Context) error {
 			return fmt.Errorf("orm: Systemtabellen anlegen: %w", err)
 		}
 	}
-	return nil
-}
-
-func (d *DB) readSchemaState(ctx context.Context) (version int, checksum string, err error) {
-	row := d.sql.QueryRowContext(ctx, `SELECT schema_version, models_checksum FROM ormpp_schema_state WHERE id = 1`)
-	switch err := row.Scan(&version, &checksum); err {
-	case nil:
-		return version, checksum, nil
-	case sql.ErrNoRows:
-		return 0, "", nil
-	default:
-		return 0, "", err
+	// Bestands-DBs aus Phase 1/2: neue Zustandsspalten additiv ergänzen.
+	cols, err := d.dial.tableColumns(d.sql, "ormpp_schema_state")
+	if err != nil {
+		return err
 	}
-}
-
-func (d *DB) writeSchemaState(ctx context.Context, version int, checksum string) error {
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO ormpp_schema_state (id, schema_version, models_checksum, updated_at)
-		VALUES (1, ?, ?, ?)
-		ON CONFLICT (id) DO UPDATE SET schema_version = excluded.schema_version,
-			models_checksum = excluded.models_checksum, updated_at = excluded.updated_at`,
-		version, checksum, time.Now().UTC().Format(time.RFC3339Nano))
-	return err
+	have := map[string]bool{}
+	for _, c := range cols {
+		have[c] = true
+	}
+	for col, ddl := range map[string]string{
+		"target_version": `ALTER TABLE ormpp_schema_state ADD COLUMN target_version INTEGER NOT NULL DEFAULT 0`,
+		"phase":          `ALTER TABLE ormpp_schema_state ADD COLUMN phase TEXT NOT NULL DEFAULT 'idle'`,
+	} {
+		if !have[col] {
+			if _, err := d.sql.ExecContext(ctx, ddl); err != nil {
+				return fmt.Errorf("orm: ormpp_schema_state erweitern: %w", err)
+			}
+		}
+	}
+	return nil
 }

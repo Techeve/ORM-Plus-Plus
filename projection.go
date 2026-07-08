@@ -70,12 +70,17 @@ func (d *DB) workerLoop(ctx context.Context) {
 	}
 }
 
-// processOnce fährt einen Verarbeitungsdurchlauf: Projektionen, Reaktoren,
-// Snapshots. Fehler werden geschluckt und im nächsten Durchlauf erneut
-// versucht (Checkpoints bleiben stehen — at-least-once).
+// processOnce fährt einen Verarbeitungsdurchlauf: Heartbeat, Projektionen,
+// Reaktoren, Snapshots, Dual-Write-Nachlauf. Fehler werden geschluckt und im
+// nächsten Durchlauf erneut versucht (Checkpoints bleiben stehen — at-least-once).
 func (d *DB) processOnce(ctx context.Context) {
 	if !d.migrated {
 		return
+	}
+	if time.Since(d.lastBeat) >= heartbeatEvery {
+		if d.heartbeat(ctx) == nil {
+			d.lastBeat = time.Now()
+		}
 	}
 	for _, m := range d.reg.ordered {
 		if m.kind != kindEventSourced {
@@ -90,6 +95,7 @@ func (d *DB) processOnce(ctx context.Context) {
 	for _, r := range reactors {
 		_ = d.processReactor(ctx, r)
 	}
+	_ = d.drainDualWrite(ctx)
 }
 
 // --- Eingebaute Projektion (Read-Model) ---

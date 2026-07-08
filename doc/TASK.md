@@ -5,7 +5,34 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 
 ## Aktueller Schritt
 
-**Phase 2 abgeschlossen** (Event Sourcing auf SQLite, alle Tests + Lint grün). Nächster Schritt: Phase 3 — Migrations-Engine (Expand/Contract-Zustandsmaschine, Dual-Write, Backfill-Worker, `ReplaceModel`/`BatchScript`-Ausführung, `FinalizeMigration`).
+**Phase 3 abgeschlossen** (Migrations-Engine auf SQLite, alle Tests + Lint grün). Nächster Schritt: Phase 4 — PostgreSQL- und YugabyteDB-Adapter (pgx, identische Testsuite gegen alle drei Backends in CI, Partitionierung, Archivierung).
+
+## Phase-3-Arbeitsplan (Reihenfolge)
+
+| # | Schritt | Status |
+|---|---|---|
+| 3.1 | Instanzregister `ormpp_instances`: Registrierung bei Migrate, Heartbeat im Worker, Abmeldung bei Close, TTL-Lebendprüfung | ✅ |
+| 3.2 | Leases mit Fencing-Token (`ormpp_leases`): acquire/renew/release, Ablauf-Übernahme; Migrations-Leader läuft darüber | ✅ |
+| 3.3 | Zustandsmaschine in `ormpp_schema_state` (current/target/phase) + Audit `ormpp_schema_history`: idle → expanding → backfill → dual-write → finalizing → idle | ✅ |
+| 3.4 | `MigrationTo`-Schritte: `ReplaceModel[Old,New]` (V-Suffix-Konvention, Scratch-Plan fürs Alt-Struct, Identitäts-/Scope-Erhalt) und `BatchScript` (Checkpoint-API auf `Batch`) | ✅ |
+| 3.5 | Backfill: batchweise, checkpointed (`ormpp_migration_progress`), drosselbar (`MigrationPlan`: BatchSize, `RowsPerSecond`), wiederaufnehmbar nach Absturz | ✅ |
+| 3.6 | Dual-Write-Nachlauf: Trigger auf Alt-Tabellen → `ormpp_dualwrite_queue`, Drain im Worker (at-least-once); Alt-Instanz-Schreibvorgänge landen laufend in der neuen Struktur | ✅ |
+| 3.7 | `FinalizeMigration`: verweigert bei lebender Alt-Instanz (`ErrMigrationPending`), leert die Queue, droppt Alt-Tabellen und aus dem Struct entfernte deprecated-Spalten, Zustand → idle | ✅ |
+| 3.8 | `ormpp_deprecated`: Markierung bei expanding; Spalten fallen erst, wenn das Feld aus dem Struct entfernt ist (nächste Contract-Runde) | ✅ |
+| 3.9 | Verhaltens-Testsuite Phase 3 (`migration_test.go`, 5 Tests) — inkl. Meilenstein: zwei App-Generationen gleichzeitig gegen dieselbe DB durch eine komplette Expand/Contract-Migration | ✅ |
+
+## Phase-3-Notizen (Entscheidungen & bewusste Grenzen)
+
+- **Neue Dateien:** `instances.go` (Instanzregister + Leases), `migration.go` (Deklarations-API: `MigrationPlan`, `ReplaceModel`, `BatchScript`, Fortschritt), `migrator.go` (Zustandsmaschine, Backfill, Trigger, Drain, Finalize); Tests in `migration_test.go`.
+- **`Migrate(ctx, plan ...MigrationPlan)`** — optionale Plan-Parameter laut API.md §8.2; `WorkersPerGeo` ist auf SQLite informativ (eine Region, ein Worker — gleiche Mechanik).
+- **V-Suffix-Konvention:** `ReplaceModel[CustomerV1, Account]` liest die Tabelle des früheren Models `Customer` — Suffix `V<n>` wird bei der Tabellen-Ableitung gestrichen.
+- **Dual-Write ist v1 einseitig:** Alt-Instanz → neue Struktur (Trigger + Queue + Drain). Die Rückrichtung (neue Instanz schreibt zusätzlich alt) bräuchte eine Rück-Transformation; als optionale `ReplaceModel`-Erweiterung notiert (sonst Echo-/Konfliktproblematik). API.md §8.2 entsprechend präzisiert.
+- **Trigger-DDL ist SQLite-Syntax** (`strftime`); wandert in Phase 4 hinter das Dialekt-Interface (PG: Trigger-Funktion, YB: eingeschränkte Trigger → ggf. Outbox-Fallback).
+- **Instanzregistrierung bei `Migrate`** (nicht bei `Open`): die deklarierte SchemaVersion steht erst nach `SchemaVersion(db, n)` fest. TTL 60 s, Heartbeat alle 5 s im Worker.
+- **Kein `target_checksum`:** Ändert jemand Modelle erneut, während dual-write läuft (gleiches Ziel, andere Checksum), wird das nicht erkannt — erst wieder nach Finalize. Notiert für Phase 5-Härtung.
+- **Backfill-Reihenfolge = Deklarationsreihenfolge** der Schritte; bei Referenzen zwischen ersetzten Modellen Schritte in Abhängigkeitsreihenfolge deklarieren.
+- **Poison-Rows in der Nachlauf-Queue** blockieren den Drain (Fehler → Retry im nächsten Durchlauf); Dead-Letter-Behandlung kommt mit der Observability (Phase 5).
+- **`ReplaceModel` setzt tenant-gebundene CRUD-Modelle voraus** (Alt- und Neu-Seite gleich gebunden); TenantFree-Umbauten laufen über `BatchScript`.
 
 ## Phase-2-Arbeitsplan (Reihenfolge)
 

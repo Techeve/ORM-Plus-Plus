@@ -674,8 +674,10 @@ orm.MigrationTo(db, 3,     // Schritte von 2 nach 3; ältere MigrationTo bleiben
 ```
 
 - **Additive Änderungen** (neue Spalte/Index/Model) brauchen keinen Schritt — Auto-Diff.
-- **Entfallende Felder** werden mit `deprecated` markiert, nie automatisch gelöscht.
+- **Entfallende Felder** werden mit `deprecated` markiert, nie automatisch gelöscht. Die Spalte fällt bei `FinalizeMigration` der Version, in der das Feld auch aus dem Struct entfernt wurde.
 - **Drift-Schutz:** Modelle geändert ohne Versions-Erhöhung ⇒ Startfehler (Checksum-Vergleich).
+- **`ReplaceModel`-Konventionen:** Der Go-Name des Alt-Structs ist der frühere Model-Name mit Versions-Suffix — `ZoneV2` liest die Tabelle des früheren Models `Zone` (Suffix `V<n>` wird für die Tabellen-Ableitung gestrichen). Tenant, Geo und — sofern die Transformation keine setzt — die ID bleiben über den Umbau erhalten. `required`/`enum`-Constraints des Ziel-Models gelten auch im Backfill. Ziel muss ein CRUD-Model sein (ES-Umbauten laufen über Events/Upcaster).
+- **`BatchScript`-Checkpoint:** Das Skript arbeitet mit den normalen ORM-APIs und sichert seinen Fortschritt über `b.Checkpoint(ctx)` / `b.SaveCheckpoint(ctx, key, rowsDone)` — bei Wiederaufnahme (Absturz, Neustart) liest es den Schlüssel zurück und setzt dort fort. Erfolgreiche Rückkehr markiert den Schritt als erledigt.
 
 ### 8.2 Ausführung
 
@@ -693,7 +695,7 @@ err = db.Migrate(ctx, orm.MigrationPlan{        // Cluster-Feintuning (optional)
 
 - **expanding:** additive DDL, global, ein Leader (Lease).
 - **backfill:** geo-parallel; Arbeitseinheit ist der Shard `(Schritt, Geo, Schlüsselbereich)`, vergeben per Lease nur an Worker **derselben Region** (`MigrationRole(MigrationWorker)`). Wiederaufnehmbar, drosselbar.
-- **dual-write:** neue Instanzen schreiben in alte und neue Struktur; alte Instanzen laufen unverändert weiter. Beide App-Generationen koexistieren.
+- **dual-write:** alte Instanzen laufen unverändert weiter und schreiben in die alte Struktur; ihre Änderungen (Insert/Update/Delete) werden per Trigger-Nachlauf laufend in die neue Struktur nachgezogen (Worker verarbeitet die Queue, at-least-once). Beide App-Generationen koexistieren. Die Rückrichtung — neue Instanzen schreiben zusätzlich in die alte Struktur — erfordert eine Rück-Transformation und ist als optionale `ReplaceModel`-Erweiterung geplant.
 - **finalizing:** explizit —
 
 ```go

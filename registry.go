@@ -93,6 +93,15 @@ func (m *model) fieldByName(name string) *field {
 	return nil
 }
 
+func (m *model) fieldByColumn(column string) *field {
+	for _, f := range m.fields {
+		if f.column == column {
+			return f
+		}
+	}
+	return nil
+}
+
 type registry struct {
 	models  map[reflect.Type]*model
 	byName  map[string]*model
