@@ -67,6 +67,19 @@ Parallelität verwischt — SQLite arbeitet in-process (µs), PostgreSQL kostet
 einen Netz-Roundtrip (ms), YugabyteDB zahlt pro Schreibzugriff Raft-Konsens
 (einige ms; im Single-Node-Docker ohne echten Cluster-Vorteil).
 
+## CI-Lauf auf konstanter Hardware
+
+In der Pipeline gibt es den **manuellen Job `bench`** (Play-Button in GitLab):
+Er fährt den Benchmark auf dem CI-Runner gegen PG/YB-Services und hängt
+`report.json` + `bench.txt` als Artefakte an (6 Monate aufbewahrt). Damit
+entsteht eine feste Vergleichsbasis über Commits hinweg — unabhängig davon,
+was auf der Entwicklermaschine gerade läuft:
+
+```sh
+# Artefakte zweier Pipeline-Läufe herunterladen, dann:
+benchstat alt/bench.txt neu/bench.txt
+```
+
 ## Berichte
 
 - **Konsole** — Tabelle pro Backend + Durchsatz-Vergleichsmatrix.
