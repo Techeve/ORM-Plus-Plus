@@ -1,0 +1,269 @@
+# ORM++ — Entwicklungs-Fahrplan
+
+Stand: 2026-07-07. Basiert auf dem Hand-off-Brief plus Interview-Entscheidungen.
+
+## 1. Festgezurrte Entscheidungen
+
+| Thema | Entscheidung |
+|---|---|
+| Modell-Deklaration | Go-Structs mit Struct-Tags, Registrierung zur Laufzeit (Reflection + Generics an der API-Oberfläche) |
+| Query-API | Typisierter Query-Builder (`Query[T]`, `Where`, `OrderBy`, …), Engine übersetzt pro Dialekt |
+| Migration | Expand/Contract mit Versionserkennung in der DB: Schema-Änderungen automatisch, entfallende Felder werden nur **markiert** (nie still gelöscht). Für Datenumbauten schreibt der Entwickler Migrationsprozesse; bei komplexen Änderungen: neues Model + Migrationsprozess. Während der Migration **Dual-Write** in alte und neue Tabelle, sodass alte und neue App-Versionen parallel laufen können. Abschluss der Migration entfernt die alte Tabelle. |
+| Konsistenzmodell | Async: Event-Append atomar (Outbox), Projektionen werden von Workern nachgezogen |
+| Read-your-writes | Command liefert Event-Position; Lesepfad kann optional darauf warten (WaitFor / Konsistenz-Token, Timeout konfigurierbar) |
+| Worker-Topologie | Beides: In-Process-Worker mit Lease-Koordination über die DB **und** optional als dedizierter Worker-Prozess startbar |
+| Event-Payloads | JSON(B) (SQLite: JSON-Text), jedes Event trägt Typ + Schema-Version; Upcaster-Funktionen (v1→v2) beim Lesen/Rebuild; Events selbst bleiben unveränderlich |
+| Snapshots & Archivierung | Beides ab v1: automatische Snapshots alle N Events pro Aggregat + Auslagerung alter Events in Archiv-/Partitionstabellen (SQLite: Emulation über Nebentabellen) |
+| Multi-Tenancy & Geo | Elementar ab v1 im Datenmodell: Tenant-UUID in jedem Datensatz jeder Tabelle; zusätzlich Geo-Felder mit **mehreren Ebenen von Geolokalität** im Design — v1 implementiert zunächst nur eine Ebene, das Schema ist aber für mehrere ausgelegt |
+| Backend-Reihenfolge | SQLite zuerst (schnelle Tests, einfache CI-Pipelines); PostgreSQL und YugabyteDB werden aber **noch vor v1.0** integriert |
+| Tooling | v1 nur Library-API (auch Migration-Finalisierung ist Go-API); CLI später |
+| Repo | gitlab.techeve.de, Gruppe `orm-plus-plus`, Projekt `orm-plus-plus`; Open Source unter **Apache 2.0** (© Techeve, entschieden zum v1.0.0-Release) |
+
+### API-Verfeinerungen (Interview-Runde 2)
+
+| Thema | Entscheidung |
+|---|---|
+| Scope im Context | Tenant **und** Geo hängen am `context.Context` (`orm.WithTenant`, `orm.WithGeo`), nicht an Funktionssignaturen. Fehlender Tenant ⇒ Fehler (fail-closed). |
+| Event-Format | Events folgen dem **CloudEvents-1.0-Standard**. Engine füllt den Envelope (`id`, `source`, `type`, `subject`, `time`, `datacontenttype`), Entwickler liefert nur `data`. Tenant/Geo/globale Sequenz als Extension-Attribute; Schema-Version im `type`-Suffix (`….v1`). Envelope-Attribute als echte Spalten der Event-Tabelle, `data` als JSONB — Export nach außen ist reines Umformatieren. |
+| Aggregat-Basis | ES-Modelle betten `orm.Aggregate` ein. `Load`/`AtVersion`/`AtTime`/`History`/`Append`/`Refresh` sowie Versions-/Snapshot-Zugriff existieren dadurch **von Haus aus** (snapshot-transparent). Einzige Pflicht des Entwicklers: `Apply(orm.Event) error`. |
+| Event-Trigger | Jedes `Append` löst automatisch über die Outbox aus: (1) eingebaute Projektion, (2) registrierbare Read-View-Generatoren (`orm.OnEvent`, persistent, at-least-once, checkpointed, rebuildfähig), (3) Live-Streams (`orm.Watch`) für Echtzeit-UIs (flüchtig; Verlässlichkeit kommt aus (2)). |
+| CRUD-API | Typisiertes Repository `orm.Repo[T]` mit Insert/Get/Update/Upsert/Delete, Query-Builder, `db.Tx` über mehrere Modelle — wie im API-Entwurf vom 2026-07-07 abgenommen. |
+| Tenant-freie Modelle | `orm.TenantFree()` als Model-Option für technische Tabellen ohne Nutzerdaten: keine Tenant-Spalte, kein Tenant-Filter, nutzbar ohne Tenant im Context. Default bleibt tenant-gebunden. |
+| Referenzen | `ref=Model[,ondelete=restrict\|cascade\|setnull]`-Tag; Durchsetzung wie beim Tenant (Engine-Prüfung überall + FK wo nativ). Referenzen nur innerhalb desselben Tenants (Ausnahme: Ziel ist TenantFree/GeoGlobal); TenantFree → tenant-gebunden ist verboten (Registrierungsfehler). Ziele dürfen ES-Modelle sein (Prüfung gegen Read-Model). Kein Eager-Loading in v1. |
+| Feld-Constraints | `immutable` (write-once wie `tenant_id`, nie im UPDATE), `required` (Zero-Value beim Insert ⇒ `ErrRequiredField`), `enum=a\|b\|c` (CHECK nativ + Engine-Prüfung), `default=…`. NULL-Fähigkeit aus dem Go-Typ: Pointer = nullable, sonst NOT NULL. |
+| Composite-Constraints | `orm.Unique(felder...)` / `orm.Index(felder...)` als Model-Optionen; Tenant/Geo automatisch in Unique-Constraints einbezogen (Eindeutigkeit pro Tenant). |
+| Batch & Bulk | `InsertMany` (Default atomar; `orm.Chunked(n)` für Volumen), mengenbasiertes `UpdateSet`/`Delete` am Query-Builder. Einfüge-Strategie wählt der Dialekt-Adapter: PG Multi-Row-INSERT → COPY ab Schwelle, YB tablet-gerechtes Batching, SQLite Prepared Statements in einer Tx. Alle Integritätsprüfungen gelten in jedem Pfad. |
+| Streaming & Sperren | `Iter()` (Cursor-Streaming statt `All()`), `GetForUpdate` in Transaktionen (`FOR UPDATE` auf PG/YB, SQLite über serialisierte Schreib-Connection). |
+| Feld-Verschlüsselung | `encrypted`-Tag (AES-256-GCM, `orm.Encryption(KeyProvider)` bei Open, rotationsfähig via Key-ID im Ciphertext); nicht indizier-/filterbar; wirkt auch in Event-Payloads und Snapshots. |
+| Tenant-Purge/Export | `db.Tenants().Export(ctx, id, w)` (DSGVO-Datenauszug) und `Purge(ctx, id)` (physisches Löschen über alle Tabellen/Events/Snapshots/Archive; nur auf archivierte Tenants, auditiert). |
+
+## 2. Architektur-Schichten
+
+```
+┌──────────────────────────────────────────────────────┐
+│ Public API (Go)                                      │
+│  Register[T] · Query[T] · Command/Append · WaitFor   │
+│  Bootstrap · Migrate · Rebuild · Snapshot/Archive    │
+├──────────────────────────────────────────────────────┤
+│ Core Engine (dialektunabhängig)                      │
+│  Model-Registry (Reflection)   Schema-Planner/Diff   │
+│  Event Store + Outbox          Projektions-Runtime   │
+│  Snapshot/Archiv-Manager       Lease-Koordinator     │
+│  Migrations-Orchestrator (Expand/Contract/DualWrite) │
+├──────────────────────────────────────────────────────┤
+│ Dialekt-Adapter (dünn)                               │
+│  sqlite (modernc/mattn)  ·  postgres (pgx)  ·  yb    │
+│  DDL-Gen · Upsert · JSON(B) · Partitionierung ·      │
+│  Koordinations-Primitiva (Lease-Tabelle, kein        │
+│  Advisory-Lock-Zwang → YB-kompatibel)                │
+└──────────────────────────────────────────────────────┘
+```
+
+Grundregeln:
+- **Oberstes Prinzip — Verhaltensgleichheit (perfekter Abstraktions-Layer):** Für die App ist irrelevant, welche Datenbank darunter liegt. Jede Deklaration wird auf jedem Backend akzeptiert und semantisch erfüllt — nativ, wo die DB es kann; emuliert oder kollabiert, wo nicht. Beispiel: eine Topologie mit fünf Regionen auf SQLite ist gültig; SQLite hat implizit die eine Region `local`, alle deklarierten Regionen mappen darauf. Gleiches gilt für Single-Region-Postgres. Die API antwortet überall identisch; App-Code darf **nie** nach dem Backend verzweigen — dieselbe Anwendung läuft byte-identisch auf SQLite (Demo/Desktop), Postgres (On-Prem) und Yugabyte (Cloud). Einzige Ausnahme: Observability-APIs (`MigrationStatus` u. Ä.) zeigen dem *Betreiber* die physische Wahrheit (z. B. eine Region `local`), niemals eine vorgetäuschte Topologie.
+- Jede systemseitige Tabelle (Events, Snapshots, Projektionen, Outbox, Leases, Schema-Versionen, Migrationszustand) trägt von Anfang an `tenant_id UUID` und die Geo-Spalte(n).
+- **Tenant-Integrität:** Tenants leben im eingebauten Register `ormpp_tenants` (GeoGlobal, Verwaltung über `db.Tenants()`; `orm.SingleTenant` wird beim Bootstrap angelegt). Jeder Insert/Append verifiziert die Tenant-ID gegen das Register (Engine-Cache + FK wo nativ; unbekannt/archiviert ⇒ `ErrUnknownTenant`). `tenant_id` ist write-once (nie in einem UPDATE, keine Umzugs-API). Jede Operation — auch Get/Update/Delete per ID — filtert auf den Context-Tenant; fremder Tenant per ID verhält sich wie `ErrNotFound`.
+- Koordination (Migrations-Leader, Projektions-Leases) läuft über **Lease-Tabellen mit Fencing**, nicht über Postgres-Advisory-Locks — die sind auf YugabyteDB nicht verlässlich verfügbar und auf SQLite ohnehin nicht.
+- Kein Feature landet im Core, das nicht auf allen drei Dialekten (nativ oder emuliert) darstellbar ist — und die Test-Suite prüft jedes Feature **verhaltensgleich** auf allen dreien.
+
+## 3. Phasen
+
+### Phase 0 — Fundament (kurz)
+- Repo auf gitlab.techeve.de unter Gruppe `orm-plus-plus` anlegen (develop default, main geschützt, Conventional Commits, Commit-Identität Claude/claude@techeve.de).
+- Go-Modul, Linting, CI-Pipeline (zunächst nur SQLite-Tests — läuft ohne Dienste).
+- ADR-Verzeichnis: die Entscheidungen aus Abschnitt 1 als ADRs 001–01x festhalten.
+
+### Phase 1 — Core auf SQLite: Modelle, Schema, CRUD, Query
+- Model-Registry: Struct-Tags parsen (Spaltentypen, PK, Indizes, `es`/`crud`-Modus, tenant/geo-Scoping), Validierung beim Registrieren.
+- Schema-Planner: deklarierte Modelle → DDL; Bootstrap legt Tabellen inkl. Systemtabellen an; Schema-Versionsstand in der DB.
+- CRUD-Pfad: Insert/Update/Delete/Get für klassische Modelle, Tenant-Filter erzwungen via `context`.
+- Typisierter Query-Builder inkl. Übersetzungsschicht (Dialekt-Interface von Tag 1, auch wenn es erst eine Implementierung gibt).
+- Meilenstein: Demo-App legt Modelle an, bootstrapt SQLite-Datei, liest/schreibt tenant-gescoped.
+
+### Phase 2 — Event Sourcing: Append, Outbox, Projektionen, Snapshots
+- Event-Store-Tabellen (Events append-only, Typ + Schema-Version, JSON-Payload, globale + Aggregat-Sequenz, tenant/geo).
+- Command-Pfad: Command → Event(s) atomar anhängen + Outbox-Eintrag; Rückgabe der Event-Position.
+- Projektions-Runtime: Worker konsumiert Outbox, materialisiert Read-Models; Checkpoints pro Projektion; Rebuild aus dem Event-Strom.
+- Lease-Koordinator (auf SQLite trivial: ein Prozess) + WaitFor-Mechanik für Read-your-writes.
+- Upcaster-Registry für Event-Schema-Versionen.
+- Snapshots: automatisch alle N Events, Laden = Snapshot + Restevents.
+- Meilenstein: event-sourced Modell mit Projektion, Rebuild und WaitFor auf SQLite, alles unter Test.
+
+### Phase 3 — Migrations-Engine (Expand/Contract, Dual-Write)
+Das Herzstück und der schwierigste Teil — bewusst nach Phase 1/2, weil sie auf Schema-Planner und Versionsstand aufsetzt:
+- Diff-Erkennung: deklarierte Modelle vs. Ist-Schema; additive Änderungen automatisch; entfallende Felder → Markierung (`deprecated`), kein Drop.
+- Migrationsprozesse: Entwickler registriert Migrations-Hooks (alt→neu-Transformation) am Model; Engine orchestriert.
+- Dual-Write-Phase: Schreibpfad schreibt in alte + neue Tabelle; Lesepfad pro App-Version auf „ihrer" Tabelle; Migrationszustand (expand → backfill → dual-write → finalize) in der DB versioniert.
+- Backfill-Worker: Bestandsdaten alt→neu kopieren/transformieren, wiederaufnehmbar, drosselbar.
+- Finalisierung als explizite API: Dual-Write beenden, alte Tabelle entfernen — erst wenn der Betreiber bestätigt, dass alle Instanzen migriert sind.
+- Meilenstein: Zwei App-Versionen laufen gleichzeitig gegen dieselbe DB durch eine komplette Expand/Contract-Migration, ohne Datenverlust (Testszenario in CI).
+
+### Phase 4 — PostgreSQL- und YugabyteDB-Adapter
+- pgx-Adapter: JSONB, Upsert (`ON CONFLICT`), echte Nebenläufigkeit für Leases/Outbox (`FOR UPDATE SKIP LOCKED`), Connection-Pooling.
+- CI erweitern: identische Test-Suite läuft gegen SQLite, Postgres **und** YugabyteDB (Container); Dialekt-Unterschiede (Sequenzen, Locking, Timeouts) hier ausbügeln.
+- Partitionierung der Event-/Archivtabellen auf PG/YB nativ; SQLite emuliert über Nebentabellen.
+- Archivierung ab hier vollwertig: alte Events (vor Snapshot) in Archivtabellen/-partitionen auslagern, historische Reads greifen transparent auf Archiv zu.
+- Meilenstein: gesamte Suite grün auf allen drei Backends.
+
+### Phase 5 — v1.0-Härtung
+- Standalone-Worker-Modus (gleiche Library, eigenes Binary-Muster).
+- Geo-Ebene 1 produktiv nutzbar (Spalten + Filter); Mehr-Ebenen-Design dokumentiert für Stufe 2.
+- Lasttests (Append-Durchsatz, Projektions-Lag, Backfill unter Last), Fehlerinjektion (Worker-Ausfall mitten in Migration/Projektion).
+- Doku + Beispielprojekt (Mini-Version des DNS-Tool-Musters: ES-Kern + CRUD-Rest).
+- Lizenzentscheidung, dann Veröffentlichung.
+
+### Stufe 2 (nach v1.0, nur notiert)
+- YB-Geo-Partitionierung mit mehreren Geolokalitäts-Ebenen, Row-Level Security nativ (PG/YB) + SQLite-Emulation, CLI-Tool, Admin-HTTP-Endpoint, Point-in-time-Reads als First-Class-API.
+- Cursor-Pagination (Keyset, `After(cursor)` mit opakem Token).
+- Volltextsuche (`fulltext`-Tag; SQLite FTS5 / PG tsvector / YB).
+- TTL/Ablaufdaten (`expires`-Feld + Sweeper-Worker; Sessions, Tokens).
+- Fortlaufende Nummernkreise pro Tenant (Rechnungsnummern; Block-Allokation für verteilte Cluster).
+- Follower-/Replika-Reads als Opt-in (`orm.StaleOK(ctx, maxAge)`).
+- Soft-Delete als Model-Option, berechnete Spalten, Aggregations-Queries (`GroupBy`/`Sum`/`Avg`).
+- Eager-Loading/Joins für Referenzen; Untertabellen statt JSON-Spalten für verschachtelte Slices.
+- Mandanten-Fusion / Tenant-Umzug als auditierte Verwaltungsoperation.
+
+## 4. Migrations-Design (Entwurf)
+
+### Versionsregistrierung
+
+Die App deklariert eine ganzzahlige, monoton steigende **Schema-Version** plus die Migrationsschritte, die zu ihr führen. ORM++ vergleicht beim Start die deklarierte mit der in der DB gespeicherten Version und führt fehlende Migrationen selbst aus:
+
+```go
+orm.Register[DNSZone](db, orm.EventSourced())
+orm.Register[ProviderAccount](db, orm.CRUD())
+
+orm.SchemaVersion(db, 3) // Version, die diese App-Version erwartet
+
+// Schritte von v2 nach v3 (alle Migrationen bleiben im Code erhalten,
+// damit auch v1→v3 in einem Zug möglich ist):
+orm.MigrationTo(db, 3,
+    // Komplexer Umbau: neues Model ersetzt altes, mit Transformation.
+    orm.ReplaceModel[ZoneV2, DNSZone](func(ctx context.Context, old ZoneV2) (DNSZone, error) {
+        return DNSZone{...}, nil
+    }),
+    // Freies Batch-Migrationsskript, checkpointed & drosselbar:
+    orm.BatchScript("normalize-records", func(ctx context.Context, b orm.Batch) error {
+        // b liefert Zeilen häppchenweise; ORM++ merkt sich den Fortschritt.
+        return nil
+    }),
+)
+
+err := db.Migrate(ctx) // erkennt Versionsdifferenz und orchestriert
+```
+
+- **Additive Änderungen** (neue Spalte, neuer Index, neues Model) brauchen keinen Migrationsschritt — sie kommen aus dem Auto-Diff.
+- **Entfallende Felder** werden nur als deprecated markiert; physisches Entfernen erst bei der Finalisierung.
+- **Drift-Schutz:** Zusätzlich zur Version speichert ORM++ einen Checksum-Hash der deklarierten Modelle. Ändern sich Modelle ohne Versions-Erhöhung ⇒ Startfehler statt stiller Schema-Änderung.
+
+### Zustandsmaschine (Online-Migration, Expand/Contract)
+
+```
+idle → expanding → backfill → dual-write → finalizing → idle
+```
+
+1. **expanding:** Lease-Inhaber legt neue Tabellen/Spalten an (nur additiv). Alte Instanzen laufen unbeeinträchtigt weiter.
+2. **backfill:** Batch-Worker kopiert/transformiert Bestandsdaten alt→neu; wiederaufnehmbar (Checkpoint pro Schritt), drosselbar.
+3. **dual-write:** Neue Instanzen schreiben in alte **und** neue Tabelle; alte Instanzen nur in die alte (deren Schreibvorgänge werden per Trigger-Fallback/Nachlauf-Backfill nachgezogen). Beide App-Generationen sehen konsistente Daten.
+4. **finalizing:** Explizit per `db.FinalizeMigration(ctx, 3)`. Vorbedingung (von ORM++ geprüft): **keine lebende Instanz mit älterer Schema-Version** im Instanzregister. Dann: Dual-Write beenden, deprecated-Felder und alte Tabellen entfernen.
+
+### Geo-verteilte Migration
+
+In geo-partitionierten Clustern (Yugabyte: EU-Daten liegen nur auf EU-Knoten usw.) darf der Backfill nicht von einem einzelnen Worker quer über Regionen laufen. Deshalb:
+
+- **Instanzen deklarieren Standort und Rolle:** `orm.InstanceGeo(...)` und `orm.MigrationRole(none|Worker)` bei `Open()`; beides steht im Instanzregister. Damit ist von außen steuerbar, welche Server (z. B. dedizierte Migrations-Instanzen je Region) mitarbeiten.
+- **Arbeitseinheit = Shard `(Schritt, Geo, Schlüsselbereich)`:** Die Engine zerlegt jede Region in Schlüsselbereiche und vergibt sie als Leases. Worker erhalten nur Shards **ihrer eigenen Region** — Datentransfer bleibt regional/tablet-lokal, die Migration startet weltweit gleichzeitig, und jede Region skaliert unabhängig (`WorkersPerGeo`, `BatchSize`, `Throttle` im `orm.MigrationPlan`).
+- **Ausfallsicherheit:** Lease läuft ab ⇒ ein anderer Worker derselben Region übernimmt den Shard am Checkpoint.
+- **Phasen:** `expanding` bleibt global (DDL einmal, ein Leader). `backfill` ist geo-parallel. `finalizing` verlangt Abschluss **aller** Regionen; früher fertige Regionen warten im Dual-Write.
+- **Beobachtbarkeit:** `db.MigrationStatus(ctx)` liefert Fortschritt, Worker-Zahl und Phase **pro Region**.
+- SQLite/Single-Region-Postgres: degeneriert automatisch zu einer Region mit einem Worker — gleiche Mechanik, kein Sonderpfad.
+
+### Systemtabellen (Teil von ORM++, Präfix `ormpp_`)
+
+| Tabelle | Zweck | Wichtigste Spalten |
+|---|---|---|
+| `ormpp_schema_state` | Globaler Migrationszustand (1 Zeile) | `current_version`, `target_version`, `phase`, `models_checksum`, `updated_at` |
+| `ormpp_schema_history` | Audit aller Versionswechsel | `version`, `phase_from/to`, `applied_at`, `applied_by_instance` |
+| `ormpp_instances` | **Instanzregister** — welche App-Instanz läuft wo mit welcher Version/Rolle | `instance_id`, `hostname`, `geo`, `migration_role`, `app_version`, `schema_version`, `started_at`, `last_heartbeat` |
+| `ormpp_migration_progress` | Checkpoints der Backfill-Shards, pro Region | `version`, `step`, `geo`, `shard_from`, `shard_to`, `worker_instance`, `last_key`, `rows_done`, `state` |
+| `ormpp_deprecated` | Markierte, noch nicht entfernte Felder/Tabellen | `model`, `column`, `deprecated_in_version` |
+| `ormpp_leases` | Koordination (Migrations-Leader, Projektions-Worker) | `name`, `holder_instance`, `fencing_token`, `expires_at` |
+| `ormpp_tenants` | Eingebautes Tenant-Register (GeoGlobal); Insert-Verifikation, write-once-Regel | `tenant_id`, `name`, `status` (active/archived), `created_at` |
+| `ormpp_outbox` / `ormpp_checkpoints` | Event-Trigger-Kette und Projektions-Stände | — |
+
+Das Instanzregister ist der Schlüssel für Dual-Write: Jede Instanz trägt sich bei `Open()` mit ihrer Schema-Version ein und heartbeatet; Instanzen ohne Heartbeat > TTL gelten als beendet. `FinalizeMigration` verweigert, solange eine lebende Instanz eine ältere Version meldet.
+
+## 5. Physisches Schema für Event-Sourcing-Modelle (Entwurf)
+
+Pro ES-Model drei Tabellen (Beispiel `zones`) plus zwei geteilte Systemtabellen:
+
+| Tabelle | Inhalt |
+|---|---|
+| `zones` | Read-Model: 1 Zeile pro Aggregat, Spalten aus dem Struct + `aggregate_seq` (Projektionsstand). Query-Builder läuft hiergegen — Lesen kostet wie bei CRUD. |
+| `zones_events` | Append-only-Log, `PARTITION BY LIST (geo)`. Spalten: `geo`, `tenant_id`, `aggregate_id`, `aggregate_seq`, `seq` (je Geo monoton), `event_id` (UUIDv7), `occurred_at`, `type_id SMALLINT`, `data JSONB`. PK `(aggregate_id, aggregate_seq)`; Index `(geo, seq)`. |
+| `zones_snapshots` | `aggregate_id`, `aggregate_seq`, `taken_at`, `state BYTEA` (zstd-komprimiert). **Nicht** append-only: Default-Politik `KeepLast(2)`, ältere werden gelöscht (Point-in-time weiter zurück läuft über Archiv-Events). |
+| `ormpp_event_types` | Typ-Wörterbuch: `type_id SMALLINT` ↔ voller CloudEvents-Typ-String; Mapping im Speicher der Registry. |
+| `ormpp_checkpoints` | Cursor aller Konsumenten: `(consumer, geo, seq)` — Cursor-Vektor, einer je Geo. |
+
+**Snapshot-Erzeugung:** Ein Snapshot ist der **serialisierte Aggregat-Zustand nach Event N** — keine separate Berechnungsfunktion. Der Worker faltet: letzter Snapshot (oder leeres Struct) + Events seither durch `Apply` → Struct serialisieren (JSON, zstd) → speichern. Die Verdichtungslogik *ist* `Apply`; eine zweite Snapshot-Funktion pro Model wäre eine Divergenzquelle (Snapshot-Laden vs. Event-Rebuild müssen identisch sein). Opt-in-Ausnahme: implementiert ein Model `SnapshotMarshal/SnapshotUnmarshal`, übernimmt es die Serialisierung selbst (abgeleitete Caches ausklammern, Spezialformate, Feld-Verschlüsselung); sonst automatische Struct-Serialisierung.
+
+**Snapshot-Intervalle & -Aufbewahrung:** deklariert **pro Model** bei der Registrierung, mit globalem Default bei `Open`: `orm.DefaultSnapshotEvery(n)` global; `orm.SnapshotEvery(n)`, `orm.SnapshotMaxAge(d)` (ODER-Bedingung), `orm.SnapshotKeepLast(n)` (Aufbewahrung, Default 2) und `orm.SnapshotDisabled()` je Model. Gezählt wird **pro Aggregat** (`aggregate_seq` seit letztem Snapshot), nicht pro Tabelle. Erstellung asynchron durch lease-koordinierte Worker je Region — nie im Schreibpfad, `Append` wird dadurch nie langsamer.
+
+**Effizienz-Entscheidungen (Nicht-Duplikation):**
+1. **Kein CloudEvents-Envelope in der Zeile** — `specversion`/`source`/`datacontenttype`/`time` sind konstant oder ableitbar; der Envelope wird beim Lesen/Export aus den Spalten rekonstruiert. CloudEvents ist Austauschformat, nicht Speicherformat.
+2. **Typ-String nur im Wörterbuch** — `type_id SMALLINT` (2 Bytes) statt ~36 Bytes Typ-String pro Event.
+3. **`data` enthält nur das Delta** — nie den vollen Zustand; der wohnt in Read-Model und Snapshots.
+4. **Keine Outbox für ES-Modelle** — das Event-Log *ist* die Outbox; Projektionen, `OnEvent`-Reaktoren und Geo-Replikate sind Cursor über dieselbe Tabelle (`ormpp_checkpoints`). Jedes Event liegt exakt einmal auf der Platte. `ormpp_outbox` existiert nur für CRUD-Modelle (Dual-Write-Nachzug, GeoFlexible-Replikation).
+
+Fixkosten ≈ 100–120 Bytes/Event + Payload.
+
+**Sequenzen & Yugabyte (entschieden):** `seq` ist je Geo monoton, nicht global — eine globale Sequenz wäre auf verteilten Clustern ein Hotspot. Garantien: strikte Ordnung pro Aggregat (`aggregate_seq`) und pro Region (`seq`); keine Totalordnung über Regionen.
+
+**Archivierung:** Events älter als der vorletzte Snapshot wandern in Archiv-Partitionen — PG/YB: Seq-Range-Partition abhängen (kein zeilenweises Kopieren); SQLite: Nebentabellen, batchweise. `History()`/`GetAt()` lesen transparent heiß + Archiv. Optional `orm.ArchiveCompression(zstd)` pro Zeile; Default unkomprimiert (Archiv bleibt SQL-abfragbar).
+
+## 6. Topologie & Instanziierung (Entwurf)
+
+Drei bewusst getrennte Geo-Begriffe:
+
+| Begriff | Deklaration | Bedeutung |
+|---|---|---|
+| **Topologie** | `orm.Topology(orm.Region("eu-central", orm.Placement(...)), …)` — gespeichert in `ormpp_geo_regions` | Welche Regionen der Cluster hat (Cluster-Zustand, keine Instanz-Konfig) |
+| **Instanz-Geo** | `orm.InstanceGeo(...)` bei `Open()` | Wo dieser Prozess läuft (bestimmt Lease-/Worker-Zuteilung) |
+| **Daten-Geo** | `orm.WithGeo(ctx, ...)` pro Request | Wohin ein Datensatz gehört (bestimmt Partition/Placement) |
+
+**Bootstrap:** Jede Instanz deklariert dieselbe Topologie (gleiches Binary); die Bootstrap-/Migrations-Lease entscheidet, wer sie anwendet. `Migrate` legt Systemtabellen und pro geo-scoped Model die Partitionen je Region an (YB: Tablespaces/Placement; PG: Partitionen; SQLite: eine implizite Region). Es gibt keine „besondere erste Instanz".
+
+**Region hinzufügen:** additiver Topologie-Diff (neue `orm.Region(...)`-Zeile + Rollout). Regionen haben einen Lebenszyklus in `ormpp_geo_regions`: `bootstrapping → active → draining → removed`. In `bootstrapping` ist `WithGeo` auf die Region fail-closed; `draining` ist der Weg zum Entfernen — keine neuen Daten, Bestandsdaten ziehen per geo-verteiltem Backfill in andere Regionen um, erst dann `removed`.
+
+**Worker-Start (regionsgebunden):** braucht genau vier Dinge — DSN (regional nahe Endpunkte), `InstanceGeo`, `MigrationRole` (default `none`), dieselben Modell-/Topologie-/Versions-Deklarationen. Beim `Open`: Validierung des Instanz-Geo gegen `ormpp_geo_regions` (unbekannt/nicht aktiv ⇒ Startfehler), Eintrag ins Instanzregister, Heartbeat. Leases gibt es nur für die eigene Region; `Migrate` ist im Normalfall No-op.
+
+Zusätzliche Systemtabelle:
+
+| Tabelle | Zweck | Wichtigste Spalten |
+|---|---|---|
+| `ormpp_geo_regions` | Topologie-Register mit Lebenszyklus | `name`, `status` (bootstrapping/active/draining/removed), `placement`, `topology_version`, `created_at` |
+
+### Geo-Modi pro Model & regionsübergreifende Datensätze
+
+Drei Modi bei der Registrierung:
+
+| Modus | Bedeutung | Umsetzung |
+|---|---|---|
+| `orm.GeoScoped()` | Genau eine Region pro Datensatz (Normalfall) | Geo-Partitionierung wie gehabt |
+| `orm.GeoGlobal()` | Model ist **immer in allen Regionen** vorhanden (Stammdaten: Tenants, Nutzer, Pläne) | YB: natives Replika-Placement + Follower-Reads, keine App-Kopien; PG/SQLite: wirkungslos (eine Region). Schreiben zahlt Cross-Region-Konsens — Registry warnt bei schreibintensiven Modellen |
+| `orm.GeoFlexible()` | **Pro Datensatz** wählbar: Heimatregion (autoritativ) + Replikat-Regionen (lesende Kopien) | `home_geo`-Spalte + `geo_replicas`-Liste; Kopien in den Partitionen der Zielregionen |
+
+`GeoFlexible` im Detail:
+- Deklaration pro Datensatz: `orm.WithGeo(ctx, "eu-central", orm.ReplicateTo("us-east"))` oder `orm.ReplicateAll()` (folgt der Topologie automatisch).
+- Schreiben geht atomar in die Heimat-Partition + Outbox; die Trigger-Kette fächert an die Replikat-Partitionen auf (at-least-once, checkpointed — dieselbe Maschinerie wie Projektionen). Replikate sind strikt lesend ⇒ keine Konflikte.
+- Schreibzugriff auf ein Replikat: per Model-Option `orm.WriteForwarding()` (an Heimat weiterleiten) oder `orm.WriteHomeOnly()` (Fehler).
+- Lesen ist lokal-bevorzugt: lokale Kopie wenn vorhanden, sonst Heimatregion.
+- Umzug/Änderung: `repo.SetGeo(ctx, id, neueHeimat, orm.ReplicateTo(...))` — engine-geführt.
+- Topologie-Integration: neue Region ⇒ `GeoGlobal`/`ReplicateAll`-Daten werden in der `bootstrapping`-Phase nachrepliziert; Draining ⇒ Replikate werden verworfen, nur Heimat-Datensätze ziehen per Backfill um.
+
+## 7. Größte Risiken
+
+1. **Dual-Write-Migration** ist die anspruchsvollste Komponente (Konfliktfälle: Schreiben in alt während Backfill läuft; Reihenfolge-Garantien). Früh ein präzises Zustandsmodell (State machine) definieren und als ADR festhalten, bevor Code entsteht.
+2. **SQLite-Nebenläufigkeit**: eine Schreib-Connection, WAL-Modus Pflicht; Outbox/Worker-Design darf nicht stillschweigend Postgres-Semantik (SKIP LOCKED) voraussetzen.
+3. **YugabyteDB-Abweichungen** trotz PG-Wire: Advisory Locks, Serialisierungsverhalten, Sequenz-Caching. Deshalb ab Phase 4 sofort in CI, nicht erst am Ende.
+4. **Reflection-Performance** im heißen Pfad: Mapping-Pläne pro Typ einmalig beim Registrieren kompilieren und cachen, nicht pro Query reflektieren.

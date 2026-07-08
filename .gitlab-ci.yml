@@ -2,6 +2,10 @@ stages:
   - test
   - release
 
+default:
+  tags:
+    - docker
+
 variables:
   GOPATH: $CI_PROJECT_DIR/.go
   GOCACHE: $CI_PROJECT_DIR/.go-cache
@@ -15,13 +19,14 @@ variables:
     fallback_keys:
       - go-develop
 
-# Format-Check, Vet und Tests mit Race-Detector und Coverage.
+# Format-Check, Vet und Tests mit Race-Detector und Coverage (SQLite).
 test:
   stage: test
   image: golang:1.26
   <<: *go-cache
   script:
-    - test -z "$(gofmt -l .)" || { echo "Nicht gofmt-konform:"; gofmt -l .; exit 1; }
+    # Nur getrackte Dateien prüfen — der Go-Cache liegt als .go/ im Projektverzeichnis.
+    - FILES=$(git ls-files '*.go'); test -z "$(gofmt -l $FILES)" || { echo "Nicht gofmt-konform:"; gofmt -l $FILES; exit 1; }
     - go vet ./...
     - go test -race -coverprofile=coverage.txt -covermode=atomic ./...
     - go tool cover -func=coverage.txt | tail -n 1
@@ -35,16 +40,97 @@ test:
     - if: $CI_COMMIT_BRANCH
     - if: $CI_COMMIT_TAG
 
-lint:
+# Identische Verhaltenssuite gegen PostgreSQL (Verhaltensgleichheit, Phase 4).
+test-postgres:
   stage: test
-  image: golangci/golangci-lint:v2.1
+  image: golang:1.26
   <<: *go-cache
+  services:
+    - name: postgres:17-alpine
+      alias: postgres
+  variables:
+    POSTGRES_USER: orm
+    POSTGRES_PASSWORD: orm
+    POSTGRES_DB: orm
+    ORMPP_TEST_BACKEND: postgres
+    ORMPP_TEST_DSN: postgres://orm:orm@postgres:5432/orm
   script:
-    - golangci-lint run --timeout 5m ./...
+    - go test -race ./...
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH
     - if: $CI_COMMIT_TAG
+
+# Identische Verhaltenssuite gegen YugabyteDB (YSQL).
+test-yugabyte:
+  stage: test
+  image: golang:1.26
+  <<: *go-cache
+  services:
+    - name: yugabytedb/yugabyte:2025.2.4.0-b122
+      alias: yugabyte
+      command: ["bin/yugabyted", "start", "--background=false"]
+  variables:
+    ORMPP_TEST_BACKEND: yugabyte
+    ORMPP_TEST_DSN: postgres://yugabyte@yugabyte:5433/yugabyte
+  script:
+    # Warten, bis YSQL antwortet (yugabyted braucht nach dem Start etwas).
+    - for i in $(seq 1 90); do (echo > /dev/tcp/yugabyte/5433) 2>/dev/null && break; sleep 2; done
+    - go test -race ./...
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# golangci-lint wird per `go install` mit derselben Go-Version gebaut wie das
+# Projekt (fertige Images hinken der Toolchain hinter); der Modul-Cache macht
+# das nach dem ersten Lauf günstig.
+lint:
+  stage: test
+  image: golang:1.26
+  <<: *go-cache
+  script:
+    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+    - $GOPATH/bin/golangci-lint run --timeout 5m ./...
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# Performance-Benchmark auf dem Runner (konstante Hardware) — MANUELL
+# startbar (Play-Button), blockiert die Pipeline nicht. Artefakte:
+# report.json (strukturiert) und bench.txt (Go-Benchmark-Format) —
+# Läufe vergleichen mit: benchstat alt/bench.txt neu/bench.txt
+bench:
+  stage: test
+  image: golang:1.26
+  <<: *go-cache
+  services:
+    - name: postgres:17-alpine
+      alias: postgres
+    - name: yugabytedb/yugabyte:2025.2.4.0-b122
+      alias: yugabyte
+      command: ["bin/yugabyted", "start", "--background=false"]
+  variables:
+    POSTGRES_USER: orm
+    POSTGRES_PASSWORD: orm
+    POSTGRES_DB: orm
+  script:
+    # Warten, bis YSQL antwortet (yugabyted braucht nach dem Start etwas).
+    - for i in $(seq 1 90); do (echo > /dev/tcp/yugabyte/5433) 2>/dev/null && break; sleep 2; done
+    - go run ./examples/bench -scale 300 -postgres "postgres://orm:orm@postgres:5432/orm" -yugabyte "postgres://yugabyte@yugabyte:5433/yugabyte" -out report.json -bench bench.txt
+  artifacts:
+    paths:
+      - report.json
+      - bench.txt
+    expire_in: 6 mos
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
+    - if: $CI_COMMIT_BRANCH
+      when: manual
+      allow_failure: true
 
 # Prüft auf Branches/MRs, dass der Changelog aus den Conventional Commits
 # generierbar ist (schlägt bei kaputter cliff.toml fehl).

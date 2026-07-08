@@ -1,0 +1,9 @@
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      # Close in defer/cleanup ist bewusst ungeprüft (Lese-Cursor bzw. Test-Teardown).
+      exclude-functions:
+        - (*database/sql.Rows).Close
+        - (*gitlab.techeve.de/orm-plus-plus/orm-plus-plus.DB).Close

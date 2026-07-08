@@ -1,0 +1,33 @@
+# Lokale Datenbanken für die Verhaltens-Testsuite gegen PostgreSQL und
+# YugabyteDB (Phase 4). Start: docker compose up -d
+#
+# Suite gegen Postgres:
+#   ORMPP_TEST_BACKEND=postgres ORMPP_TEST_DSN="postgres://orm:orm@localhost:5433/orm" go test -race ./...
+# Suite gegen YugabyteDB:
+#   ORMPP_TEST_BACKEND=yugabyte ORMPP_TEST_DSN="postgres://yugabyte@localhost:5434/yugabyte" go test -race ./...
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: orm
+      POSTGRES_PASSWORD: orm
+      POSTGRES_DB: orm
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orm -d orm"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  yugabyte:
+    image: yugabytedb/yugabyte:2025.2.4.0-b122
+    command: ["bin/yugabyted", "start", "--background=false"]
+    ports:
+      - "5434:5433"   # YSQL
+      - "15433:15433" # UI
+    healthcheck:
+      test: ["CMD-SHELL", "bin/ysqlsh -h $(hostname) -c 'SELECT 1' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
