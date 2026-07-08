@@ -17,7 +17,7 @@ const heartbeatEvery = 5 * time.Second
 // aktualisiert ihre Schema-Version und den Heartbeat.
 func (d *DB) registerInstance(ctx context.Context) error {
 	now := nowUTC().Format(time.RFC3339Nano)
-	_, err := d.sql.ExecContext(ctx, `
+	_, err := d.q().ExecContext(ctx, `
 		INSERT INTO ormpp_instances (instance_id, hostname, geo, migration_role, app_version, schema_version, started_at, last_heartbeat)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (instance_id) DO UPDATE SET
@@ -34,7 +34,7 @@ func (d *DB) registerInstance(ctx context.Context) error {
 
 // heartbeat aktualisiert den Lebenszeichen-Stempel dieser Instanz.
 func (d *DB) heartbeat(ctx context.Context) error {
-	_, err := d.sql.ExecContext(ctx,
+	_, err := d.q().ExecContext(ctx,
 		`UPDATE ormpp_instances SET last_heartbeat = ? WHERE instance_id = ?`,
 		nowUTC().Format(time.RFC3339Nano), d.instanceID.String())
 	return err
@@ -43,14 +43,14 @@ func (d *DB) heartbeat(ctx context.Context) error {
 // deregisterInstance entfernt die Instanz aus dem Register und gibt ihre
 // Leases frei (bei Close).
 func (d *DB) deregisterInstance(ctx context.Context) {
-	_, _ = d.sql.ExecContext(ctx, `DELETE FROM ormpp_instances WHERE instance_id = ?`, d.instanceID.String())
-	_, _ = d.sql.ExecContext(ctx, `DELETE FROM ormpp_leases WHERE holder = ?`, d.instanceID.String())
+	_, _ = d.q().ExecContext(ctx, `DELETE FROM ormpp_instances WHERE instance_id = ?`, d.instanceID.String())
+	_, _ = d.q().ExecContext(ctx, `DELETE FROM ormpp_leases WHERE holder = ?`, d.instanceID.String())
 }
 
 // livingOlderInstance liefert eine lebende Instanz mit Schema-Version < version
 // ("" wenn keine) — die Vorbedingung von FinalizeMigration.
 func (d *DB) livingOlderInstance(ctx context.Context, version int) (string, int, error) {
-	rows, err := d.sql.QueryContext(ctx,
+	rows, err := d.q().QueryContext(ctx,
 		`SELECT instance_id, schema_version, last_heartbeat FROM ormpp_instances WHERE schema_version < ?`, version)
 	if err != nil {
 		return "", 0, err
@@ -122,6 +122,6 @@ func (d *DB) acquireLease(ctx context.Context, name string, ttl time.Duration) (
 }
 
 func (d *DB) releaseLease(ctx context.Context, name string) {
-	_, _ = d.sql.ExecContext(ctx,
+	_, _ = d.q().ExecContext(ctx,
 		`DELETE FROM ormpp_leases WHERE name = ? AND holder = ?`, name, d.instanceID.String())
 }

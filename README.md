@@ -18,9 +18,22 @@ In Entwicklung (Phase 0/1) — noch keine stabile API.
 ## Entwicklung
 
 ```sh
-go test -race ./...   # Tests
+go test -race ./...   # Tests (SQLite, Default)
 gofmt -l .            # Format-Check
 ```
+
+### Tests gegen PostgreSQL und YugabyteDB
+
+Die **identische** Verhaltenssuite läuft gegen alle drei Backends. Lokal via Docker:
+
+```sh
+docker compose up -d   # startet PostgreSQL (Port 5433) und YugabyteDB (YSQL, Port 5434)
+
+ORMPP_TEST_BACKEND=postgres ORMPP_TEST_DSN="postgres://orm:orm@localhost:5433/orm" go test -race ./...
+ORMPP_TEST_BACKEND=yugabyte ORMPP_TEST_DSN="postgres://yugabyte@localhost:5434/yugabyte" go test -race ./...
+```
+
+Jeder Test bekommt dabei ein eigenes Schema (search_path) und räumt es am Ende weg. Die CI fährt dieselbe Matrix (SQLite, PostgreSQL, YugabyteDB als Services).
 
 ### Workflow
 

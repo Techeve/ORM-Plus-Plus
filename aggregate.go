@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"reflect"
+	"strings"
 	"time"
 )
 
@@ -327,10 +328,22 @@ func (a *Aggregate) Append(ctx context.Context, payloads ...any) (Position, erro
 		return nil
 	}
 
+	// Unter echter Nebenläufigkeit (PG/YB) kann die MAX-Prüfung zweier
+	// paralleler Appends gleichzeitig bestehen — dann entscheidet der PK
+	// (aggregate_id, aggregate_seq) ⇒ ErrVersionConflict. Kollisionen auf
+	// der Geo-Sequenz (anderes Aggregat, gleiche seq) werden wiederholt;
+	// beides passiert vor Apply, der In-Memory-Zustand bleibt unberührt.
 	if a.rt.h.inTx() {
-		err = write(a.rt.h.q())
+		err = classifyAppendErr(write(a.rt.h.q()), ev)
 	} else {
-		err = d.Tx(ctx, func(tx Tx) error { return write(tx.q()) })
+		for attempt := 0; ; attempt++ {
+			err = d.Tx(ctx, func(tx Tx) error { return write(tx.q()) })
+			if err != nil && isSeqCollision(err, ev) && attempt < 5 {
+				continue
+			}
+			err = classifyAppendErr(err, ev)
+			break
+		}
 	}
 	if err != nil {
 		return Position{}, err
@@ -476,6 +489,26 @@ func (a *Aggregate) History(ctx context.Context) iter.Seq2[CloudEvent, error] {
 			}
 		}
 	}
+}
+
+// classifyAppendErr mappt eine PK-Verletzung des Event-Logs (paralleler
+// Append auf dasselbe Aggregat) auf ErrVersionConflict.
+func classifyAppendErr(err error, eventsTable string) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, eventsTable+"_pkey") || strings.Contains(msg, eventsTable+".aggregate_id") {
+		return ErrVersionConflict
+	}
+	return err
+}
+
+// isSeqCollision erkennt eine Kollision auf dem Unique-Index (geo, seq) —
+// zwei parallele Appends verschiedener Aggregate; wiederholbar.
+func isSeqCollision(err error, eventsTable string) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "ux_"+eventsTable+"_geo_seq") || strings.Contains(msg, eventsTable+".geo")
 }
 
 // fetchEventRows liest eine Ergebnismenge vollständig ein und schließt den Cursor.

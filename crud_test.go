@@ -3,7 +3,6 @@ package orm
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -38,7 +37,7 @@ type SysConfig struct {
 
 func testDB(t *testing.T) (*DB, context.Context) {
 	t.Helper()
-	db, err := Open(SQLite(filepath.Join(t.TempDir(), "test.db")))
+	db, err := Open(newTestStore(t)())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -382,11 +381,10 @@ func TestTenantFreeModel(t *testing.T) {
 }
 
 func TestSchemaDriftAndAdditiveDiff(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "drift.db")
+	store := newTestStore(t)
 
 	open := func() *DB {
-		db, err := Open(SQLite(path))
+		db, err := Open(store())
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
@@ -427,7 +425,7 @@ func TestSchemaDriftAndAdditiveDiff(t *testing.T) {
 }
 
 func TestTopologyGeoValidation(t *testing.T) {
-	db, err := Open(SQLite(filepath.Join(t.TempDir(), "geo.db")))
+	db, err := Open(newTestStore(t)())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

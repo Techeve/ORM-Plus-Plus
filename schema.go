@@ -16,13 +16,13 @@ func (d *DB) applySchema(ctx context.Context) error {
 		return err
 	}
 	for _, m := range models {
-		existing, err := d.dial.tableColumns(d.sql, m.table)
+		existing, err := d.dial.tableColumns(d.q(), m.table)
 		if err != nil {
 			return fmt.Errorf("orm: Schema von %s lesen: %w", m.table, err)
 		}
 		if len(existing) == 0 {
-			for _, stmt := range createTableSQL(m) {
-				if _, err := d.sql.ExecContext(ctx, stmt); err != nil {
+			for _, stmt := range createTableSQL(d.dial, m) {
+				if _, err := d.q().ExecContext(ctx, stmt); err != nil {
 					return fmt.Errorf("orm: %s anlegen: %w (%s)", m.table, err, stmt)
 				}
 			}
@@ -33,12 +33,12 @@ func (d *DB) applySchema(ctx context.Context) error {
 			}
 			for _, f := range m.fields {
 				if !have[f.column] {
-					ddl := columnDDL(f, false)
+					ddl := columnDDL(d.dial, f, false)
 					if m.kind == kindEventSourced {
-						ddl = esColumnDDL(f)
+						ddl = esColumnDDL(d.dial, f)
 					}
 					stmt := fmt.Sprintf("ALTER TABLE %q ADD COLUMN %s", m.table, ddl)
-					if _, err := d.sql.ExecContext(ctx, stmt); err != nil {
+					if _, err := d.q().ExecContext(ctx, stmt); err != nil {
 						return fmt.Errorf("orm: Spalte %s.%s ergänzen: %w", m.table, f.column, err)
 					}
 				}
@@ -56,10 +56,10 @@ func (d *DB) applySchema(ctx context.Context) error {
 // ensureESTables legt Event-Log und Snapshot-Tabelle eines ES-Models an.
 func (d *DB) ensureESTables(ctx context.Context, m *model) error {
 	for table, stmts := range map[string][]string{
-		esEventsTable(m): esEventsSQL(m),
-		esSnapsTable(m):  esSnapshotsSQL(m),
+		esEventsTable(m): esEventsSQL(d.dial, m),
+		esSnapsTable(m):  esSnapshotsSQL(d.dial, m),
 	} {
-		existing, err := d.dial.tableColumns(d.sql, table)
+		existing, err := d.dial.tableColumns(d.q(), table)
 		if err != nil {
 			return fmt.Errorf("orm: Schema von %s lesen: %w", table, err)
 		}
@@ -67,7 +67,7 @@ func (d *DB) ensureESTables(ctx context.Context, m *model) error {
 			continue
 		}
 		for _, stmt := range stmts {
-			if _, err := d.sql.ExecContext(ctx, stmt); err != nil {
+			if _, err := d.q().ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("orm: %s anlegen: %w (%s)", table, err, stmt)
 			}
 		}
@@ -76,15 +76,15 @@ func (d *DB) ensureESTables(ctx context.Context, m *model) error {
 }
 
 // createTableSQL erzeugt CREATE TABLE + Indizes für ein Model.
-func createTableSQL(m *model) []string {
+func createTableSQL(dial dialect, m *model) []string {
 	if m.kind == kindEventSourced {
-		return esReadModelSQL(m)
+		return esReadModelSQL(dial, m)
 	}
 	var cols []string
 	var constraints []string
 
 	for _, f := range m.fields {
-		cols = append(cols, columnDDL(f, true))
+		cols = append(cols, columnDDL(dial, f, true))
 	}
 	if m.tenanted() {
 		cols = append(cols, `tenant_id TEXT NOT NULL REFERENCES ormpp_tenants (tenant_id)`)
@@ -132,28 +132,29 @@ func indexStmts(m *model) []string {
 // esReadModelSQL erzeugt das Read-Model eines ES-Models: implizite "id" als
 // PK, die Struct-Spalten ohne NOT-NULL/CHECK (Validierung ist Sache von
 // Apply — die Zeile ist ein Projektions-Artefakt), plus aggregate_seq.
-func esReadModelSQL(m *model) []string {
+func esReadModelSQL(dial dialect, m *model) []string {
 	cols := []string{`"id" TEXT PRIMARY KEY`}
 	for _, f := range m.fields {
-		cols = append(cols, esColumnDDL(f))
+		cols = append(cols, esColumnDDL(dial, f))
 	}
 	if m.tenanted() {
 		cols = append(cols, `tenant_id TEXT NOT NULL REFERENCES ormpp_tenants (tenant_id)`)
 	}
 	cols = append(cols,
 		`geo TEXT NOT NULL DEFAULT 'local'`,
-		`"aggregate_seq" INTEGER NOT NULL DEFAULT 0`)
+		fmt.Sprintf(`"aggregate_seq" %s NOT NULL DEFAULT 0`, dial.columnType(kInt)))
 	stmts := []string{fmt.Sprintf("CREATE TABLE %q (\n  %s\n)", m.table, strings.Join(cols, ",\n  "))}
 	return append(stmts, indexStmts(m)...)
 }
 
-func esColumnDDL(f *field) string {
-	return fmt.Sprintf("%q %s", f.column, sqlType(f))
+func esColumnDDL(dial dialect, f *field) string {
+	return fmt.Sprintf("%q %s", f.column, dial.columnType(colKindOf(f)))
 }
 
 // esEventsSQL erzeugt den Append-only-Event-Log eines ES-Models.
-func esEventsSQL(m *model) []string {
+func esEventsSQL(dial dialect, m *model) []string {
 	t := esEventsTable(m)
+	intT := dial.columnType(kInt)
 	tenantCol := ""
 	if m.tenanted() {
 		tenantCol = "\n  \"tenant_id\" TEXT NOT NULL,"
@@ -161,22 +162,22 @@ func esEventsSQL(m *model) []string {
 	return []string{
 		fmt.Sprintf(`CREATE TABLE %q (
   "aggregate_id" TEXT NOT NULL,
-  "aggregate_seq" INTEGER NOT NULL,%s
+  "aggregate_seq" %s NOT NULL,%s
   "geo" TEXT NOT NULL,
-  "seq" INTEGER NOT NULL,
+  "seq" %s NOT NULL,
   "event_id" TEXT NOT NULL,
   "occurred_at" TEXT NOT NULL,
-  "type_id" INTEGER NOT NULL,
+  "type_id" %s NOT NULL,
   "data" TEXT NOT NULL,
   PRIMARY KEY ("aggregate_id", "aggregate_seq")
-)`, t, tenantCol),
+)`, t, intT, tenantCol, intT, intT),
 		fmt.Sprintf("CREATE UNIQUE INDEX %q ON %q (%s)", "ux_"+t+"_geo_seq", t, quoteAll("geo", "seq")),
 	}
 }
 
 // esSnapshotsSQL erzeugt die Snapshot-Tabelle eines ES-Models. Nicht
 // append-only: KeepLast-Politik löscht ältere Stände.
-func esSnapshotsSQL(m *model) []string {
+func esSnapshotsSQL(dial dialect, m *model) []string {
 	t := esSnapsTable(m)
 	tenantCol := ""
 	if m.tenanted() {
@@ -184,11 +185,11 @@ func esSnapshotsSQL(m *model) []string {
 	}
 	return []string{fmt.Sprintf(`CREATE TABLE %q (
   "aggregate_id" TEXT NOT NULL,
-  "aggregate_seq" INTEGER NOT NULL,%s
+  "aggregate_seq" %s NOT NULL,%s
   "taken_at" TEXT NOT NULL,
-  "state" BLOB NOT NULL,
+  "state" %s NOT NULL,
   PRIMARY KEY ("aggregate_id", "aggregate_seq")
-)`, t, tenantCol)}
+)`, t, dial.columnType(kInt), tenantCol, dial.columnType(kBlob))}
 }
 
 // uniqueIndexSQL bezieht tenant_id automatisch ein: Eindeutigkeit gilt pro Tenant.
@@ -219,9 +220,9 @@ func quoteAll(cols ...string) string {
 
 // columnDDL erzeugt die Spaltendefinition eines Feldes.
 // inCreate steuert, ob PK-Klauseln erlaubt sind (ALTER ADD COLUMN kann das nicht).
-func columnDDL(f *field, inCreate bool) string {
+func columnDDL(dial dialect, f *field, inCreate bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%q %s", f.column, sqlType(f))
+	fmt.Fprintf(&b, "%q %s", f.column, dial.columnType(colKindOf(f)))
 	if f.pk && inCreate {
 		b.WriteString(" PRIMARY KEY")
 	}
@@ -230,7 +231,7 @@ func columnDDL(f *field, inCreate bool) string {
 			b.WriteString(" NOT NULL")
 		} else {
 			// ALTER ADD COLUMN mit NOT NULL braucht einen Default für Bestandszeilen.
-			fmt.Fprintf(&b, " NOT NULL DEFAULT %s", zeroLiteral(f))
+			fmt.Fprintf(&b, " NOT NULL DEFAULT %s", dial.zeroLiteral(colKindOf(f)))
 		}
 	}
 	if f.hasDefault {
@@ -246,42 +247,29 @@ func columnDDL(f *field, inCreate bool) string {
 	return b.String()
 }
 
-func sqlType(f *field) string {
+// colKindOf klassifiziert ein Feld backend-neutral; den physischen Typ
+// liefert der Dialekt (SQLite: TEXT/INTEGER/REAL/BLOB, PG: BIGINT/JSONB/BYTEA …).
+func colKindOf(f *field) colKind {
 	t := f.goType
 	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	switch {
 	case f.json:
-		return "TEXT"
-	case t == idType:
-		return "TEXT"
-	case t == timeType:
-		return "TEXT"
+		return kJSON
+	case t == idType, t == timeType:
+		return kText
 	case t.Kind() == reflect.String:
-		return "TEXT"
+		return kText
 	case t.Kind() == reflect.Bool:
-		return "INTEGER"
+		return kBool
 	case t.Kind() >= reflect.Int && t.Kind() <= reflect.Uint64:
-		return "INTEGER"
+		return kInt
 	case t.Kind() == reflect.Float32 || t.Kind() == reflect.Float64:
-		return "REAL"
+		return kFloat
 	case t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8:
-		return "BLOB"
+		return kBlob
 	default:
-		return "TEXT" // komplexe Typen brauchen das json-Tag; validiert die Registry künftig strenger
-	}
-}
-
-func zeroLiteral(f *field) string {
-	switch sqlType(f) {
-	case "INTEGER":
-		return "0"
-	case "REAL":
-		return "0"
-	case "BLOB":
-		return "x''"
-	default:
-		return "''"
+		return kText // komplexe Typen brauchen das json-Tag; validiert die Registry künftig strenger
 	}
 }

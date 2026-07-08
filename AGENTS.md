@@ -8,7 +8,7 @@ korrekt auf diesem Projekt arbeiten zu können. Vor dem ersten Tool-Call hier le
 **Name:** ORM++
 **Import-Pfad:** `gitlab.techeve.de/orm-plus-plus/orm-plus-plus`
 **Go-Version:** 1.26
-**Status:** Phase 1 (CRUD) + Phase 2 (Event Sourcing) + Phase 3 (Migrations-Engine) auf SQLite abgeschlossen ✅ — Phase 4 (PostgreSQL/YugabyteDB-Adapter) als Nächstes.
+**Status:** Phasen 1–3 (CRUD, Event Sourcing, Migrations-Engine) + Phase 4 Kern (PostgreSQL/YugabyteDB-Adapter, Suite läuft backend-identisch) abgeschlossen ✅ — offen: Partitionierung/Archivierung (4b), dann Phase 5 (v1.0-Härtung).
 
 ORM++ ist eine Go-Library für model-first Persistenz: klassisches ORM-Mapping **plus**
 Event Sourcing, Projektionen, Snapshots und Expand/Contract-Migrationen — optimiert für
@@ -55,8 +55,9 @@ DB-Details.
 | `context.go` | `WithTenant`, `WithGeo`, `ReplicateTo`, `ReplicateAll` |
 | `options.go` | Alle Option-Typen: `OpenOption`, `ModelMode`, `ModelOption`, `BatchOption`, `Role` |
 | `registry.go` | Tag-Parsing, Validierung (inkl. ES: Aggregate-Einbettung, Apply), Referenzauflösung, Topo-Sort, Checksum |
-| `driver.go` | `Driver`-Interface, `dialect`-Interface, `Postgres`/`Yugabyte` Stubs (Phase 4) |
-| `sqlite.go` | SQLite-Treiber: WAL, FK, txlock=immediate, MaxOpenConns=1 (modernc.org/sqlite) |
+| `driver.go` | `Driver`-Interface, `dialect`-Interface (rebind/columnType/autoPK/forUpdate/Trigger-DDL), `dialq`-Rebind-Wrapper |
+| `sqlite.go` | SQLite-Treiber + Dialekt: WAL, FK, txlock=immediate, MaxOpenConns=1 (modernc.org/sqlite) |
+| `postgres.go` | PostgreSQL-/YugabyteDB-Treiber + Dialekt (pgx stdlib): $n-Rebind, BIGINT/JSONB/BYTEA, FOR UPDATE, plpgsql-Trigger |
 | `db.go` | `DB`-Struct, `Open`, `Register[T]`, `Migrate` (Erstinstallation/No-op/Upgrade), `Tx`, `Topology`, `Tenants`, `StartWorkers`/`Close` |
 | `schema.go` | DDL-Generierung (CRUD + ES-Read-Model/Events/Snapshots), additiver Diff |
 | `values.go` | Typ-Konversionen, `scanModelRows[T]` (inkl. Aggregat-Verdrahtung bei ES) |
@@ -72,20 +73,19 @@ DB-Details.
 | `migrator.go` | Zustandsmaschine idle→expanding→backfill→dual-write→finalizing, Backfill (checkpointed/drosselbar), Dual-Write-Trigger + Queue-Drain, `FinalizeMigration`, deprecated-Verwaltung |
 | `instances.go` | Instanzregister (`ormpp_instances`, Heartbeat/TTL) + Leases mit Fencing (`ormpp_leases`) |
 
-Tests: `crud_test.go` (Phase 1), `es_test.go` (Phase 2), `migration_test.go` (Phase 3) — laufen später unverändert gegen PG/YB.
+Tests: `crud_test.go` (Phase 1), `es_test.go` (Phase 2), `migration_test.go` (Phase 3) — laufen **unverändert** gegen alle drei Backends. Backend-Wahl über `ORMPP_TEST_BACKEND` (sqlite|postgres|yugabyte) + `ORMPP_TEST_DSN` (`backend_test.go`: Schema-pro-Test-Isolation). Lokal: `docker compose up -d` (PG auf 5433, YB-YSQL auf 5434), siehe README.
 
 ### Absichtliche Stubs / bewusste Grenzen
 
 | API | Fehler / Verhalten | Geplant |
 |---|---|---|
-| `repo.SetGeo` | gibt Fehler zurück | Phase 4/5 |
+| `repo.SetGeo` | gibt Fehler zurück | Phase 4b/5 |
 | `Tenants().Export` / `Purge` | gibt Fehler zurück | Phase 5 |
-| `Postgres`/`Yugabyte` Driver | gibt Fehler zurück | Phase 4 |
 | `encrypted`-Tag | Registrierungsfehler | Phase 5 |
 | `MigrationStatus`/`Health` | existiert noch nicht | Phase 5 |
-| Archiv-Tabellen, Snapshot-Kompression | Events bleiben im Hot-Log, Snapshots unkomprimiert | Phase 4 |
-| Lease-Koordination der Projektions-Worker | ein Prozess = ein Worker-Loop (Migrations-Leader nutzt Leases bereits) | Phase 4 |
-| Dual-Write-Rückrichtung (neu→alt) | einseitig alt→neu via Trigger-Nachlauf; Rück-Transformation als `ReplaceModel`-Option geplant | Phase 4/5 |
+| Native Geo-Partitionierung + Archiv-Tabellen, Snapshot-Kompression | Events bleiben im Hot-Log (eine Tabelle), Snapshots unkomprimiert | Phase 4b |
+| Lease-Koordination der Projektions-Worker | ein Worker-Loop pro Instanz, unkoordiniert (Migrations-Leader nutzt Leases bereits) | Phase 4b |
+| Dual-Write-Rückrichtung (neu→alt) | einseitig alt→neu via Trigger-Nachlauf; Rück-Transformation als `ReplaceModel`-Option geplant | Phase 5 |
 
 ## 5. Coding-Konventionen
 
@@ -102,7 +102,8 @@ Tests: `crud_test.go` (Phase 1), `es_test.go` (Phase 2), `migration_test.go` (Ph
   bool → INTEGER, json-Tag → TEXT, `[]byte` → BLOB.
 - **Unique-Constraints:** Beziehen `tenant_id` automatisch ein.
 - **Fehler:** `fmt.Errorf("orm: …: %w", sentinelErr)` — immer Package-Präfix + Sentinel.
-- **Neue Abhängigkeiten:** Nur nach Diskussion. Einzige externe Dep. ist `modernc.org/sqlite`.
+- **Neue Abhängigkeiten:** Nur nach Diskussion. Externe Deps: `modernc.org/sqlite` (CGO-frei) und `github.com/jackc/pgx/v5` (PG/YB, laut ROADMAP Phase 4).
+- **SQL-Platzhalter:** Engine-Code schreibt immer `?`; der `dialq`-Wrapper rebindet pro Dialekt. Nie `d.sql` direkt für Queries verwenden — immer `d.q()`.
 
 ## 6. Datenmodell-Invarianten
 
@@ -117,14 +118,18 @@ Tests: `crud_test.go` (Phase 1), `es_test.go` (Phase 2), `migration_test.go` (Ph
 ## 7. Tests & lokale Befehle
 
 ```sh
-go test -race ./...                      # alle Tests mit Race-Detector
+go test -race ./...                      # alle Tests (SQLite, Default)
 go test -race -run TestFoo ./...         # einzelner Test
 FILES=$(git ls-files '*.go'); gofmt -l $FILES  # Format-Check (kein "." — CI-Workaround)
 go vet ./...
+
+# Gegen PostgreSQL/YugabyteDB (docker compose up -d):
+ORMPP_TEST_BACKEND=postgres ORMPP_TEST_DSN="postgres://orm:orm@localhost:5433/orm" go test -race ./...
+ORMPP_TEST_BACKEND=yugabyte ORMPP_TEST_DSN="postgres://yugabyte@localhost:5434/yugabyte" go test -race ./...
 ```
 
-Die Verhaltens-Testsuite (`crud_test.go`, Phase 1) läuft später **unverändert** gegen
-PostgreSQL und YugabyteDB. Keine backend-spezifischen Assertions einbauen.
+Die Verhaltens-Testsuite läuft **unverändert** gegen alle drei Backends —
+keine backend-spezifischen Assertions einbauen.
 
 ## 8. Git-Workflow
 

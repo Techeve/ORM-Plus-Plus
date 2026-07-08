@@ -30,7 +30,7 @@ func setCheckpoint(ctx context.Context, q queryer, consumer, geo string, seq int
 
 // eventGeos liefert alle Geos, die im Event-Log eines Models vorkommen.
 func (d *DB) eventGeos(ctx context.Context, m *model) ([]string, error) {
-	rows, err := d.sql.QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT geo FROM %q`, esEventsTable(m)))
+	rows, err := d.q().QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT geo FROM %q`, esEventsTable(m)))
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func (d *DB) processProjection(ctx context.Context, m *model) error {
 		return err
 	}
 	for _, geo := range geos {
-		cp, err := getCheckpoint(ctx, d.sql, consumer, geo)
+		cp, err := getCheckpoint(ctx, d.q(), consumer, geo)
 		if err != nil {
 			return err
 		}
@@ -124,7 +124,7 @@ func (d *DB) processProjection(ctx context.Context, m *model) error {
 				sel = `"aggregate_id", "tenant_id", "seq"`
 			}
 			query := fmt.Sprintf(`SELECT %s FROM %q WHERE geo = ? AND seq > ? ORDER BY seq`, sel, esEventsTable(m))
-			rows, err := d.sql.QueryContext(ctx, query, geo, cp)
+			rows, err := d.q().QueryContext(ctx, query, geo, cp)
 			if err != nil {
 				return err
 			}
@@ -257,13 +257,13 @@ func (d *DB) processReactor(ctx context.Context, r *reactor) error {
 	}
 	for _, geo := range geos {
 		for {
-			cp, err := getCheckpoint(ctx, d.sql, consumer, geo)
+			cp, err := getCheckpoint(ctx, d.q(), consumer, geo)
 			if err != nil {
 				return err
 			}
 			query := fmt.Sprintf(`SELECT %s FROM %q WHERE geo = ? AND seq > ? ORDER BY seq LIMIT 500`,
 				esEventSelect(m), esEventsTable(m))
-			batch, err := fetchEventRows(ctx, d.sql, m, query, []any{geo, cp})
+			batch, err := fetchEventRows(ctx, d.q(), m, query, []any{geo, cp})
 			if err != nil {
 				return err
 			}
@@ -327,7 +327,7 @@ func (d *DB) maybeSnapshot(ctx context.Context, m *model) error {
 			sel = `"aggregate_id", "tenant_id", MAX("aggregate_seq"), MIN("occurred_at")`
 			group = `"aggregate_id", "tenant_id"`
 		}
-		rows, err := d.sql.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM %q GROUP BY %s`, sel, ev, group))
+		rows, err := d.q().QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM %q GROUP BY %s`, sel, ev, group))
 		if err != nil {
 			return err
 		}
@@ -361,7 +361,7 @@ func (d *DB) maybeSnapshot(ctx context.Context, m *model) error {
 	}
 	snaps := map[string]snapState{}
 	{
-		rows, err := d.sql.QueryContext(ctx, fmt.Sprintf(
+		rows, err := d.q().QueryContext(ctx, fmt.Sprintf(
 			`SELECT "aggregate_id", MAX("aggregate_seq"), MAX("taken_at") FROM %q GROUP BY "aggregate_id"`, sn))
 		if err != nil {
 			return err
@@ -416,7 +416,7 @@ func (d *DB) snapshotAggregate(ctx context.Context, m *model, aggID string, tena
 	}
 	inst := reflect.New(m.goType)
 	agg := wireAggregate(m, inst.Interface(), d, id)
-	if err := d.foldInto(ctx, d.sql, m, agg, tenant, 0, nil); err != nil {
+	if err := d.foldInto(ctx, d.q(), m, agg, tenant, 0, nil); err != nil {
 		return err
 	}
 	if agg.version == 0 {
@@ -464,7 +464,7 @@ func (d *DB) waitForProjection(ctx context.Context, m *model, pos Position, time
 	for {
 		done := true
 		for geo, want := range pos.seqs {
-			cp, err := getCheckpoint(ctx, d.sql, consumer, geo)
+			cp, err := getCheckpoint(ctx, d.q(), consumer, geo)
 			if err != nil {
 				return err
 			}
@@ -524,7 +524,7 @@ func RebuildView(ctx context.Context, d *DB, name string) error {
 	if target == nil {
 		return fmt.Errorf("orm: unbekannte View %q", name)
 	}
-	if _, err := d.sql.ExecContext(ctx, `DELETE FROM ormpp_checkpoints WHERE consumer = ?`, "view:"+name); err != nil {
+	if _, err := d.q().ExecContext(ctx, `DELETE FROM ormpp_checkpoints WHERE consumer = ?`, "view:"+name); err != nil {
 		return err
 	}
 	return d.processReactor(ctx, target)

@@ -56,7 +56,7 @@ type DB struct {
 }
 
 func (d *DB) db() *DB    { return d }
-func (d *DB) q() queryer { return d.sql }
+func (d *DB) q() queryer { return dialq{q: d.sql, dial: d.dial} }
 func (d *DB) inTx() bool { return false }
 
 // Tx ist eine laufende Transaktion.
@@ -70,7 +70,7 @@ type txHandle struct {
 }
 
 func (t *txHandle) db() *DB    { return t.parent }
-func (t *txHandle) q() queryer { return t.tx }
+func (t *txHandle) q() queryer { return dialq{q: t.tx, dial: t.parent.dial} }
 func (t *txHandle) inTx() bool { return true }
 
 // Open baut die Verbindung auf und initialisiert die Instanz.
@@ -266,7 +266,7 @@ func (d *DB) Migrate(ctx context.Context, plans ...MigrationPlan) error {
 		if err := d.applySchema(ctx); err != nil {
 			return err
 		}
-		if err := d.writeSchemaState(ctx, d.sql, schemaState{
+		if err := d.writeSchemaState(ctx, d.q(), schemaState{
 			current: d.schemaVersion, phase: phaseIdle, checksum: sum,
 		}); err != nil {
 			return err
@@ -308,14 +308,14 @@ func (d *DB) bootstrapSystemTables(ctx context.Context) error {
 			models_checksum TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS ormpp_schema_history (
-			id INTEGER PRIMARY KEY,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS ormpp_schema_history (
+			id %s,
 			version INTEGER NOT NULL,
 			phase_from TEXT NOT NULL,
 			phase_to TEXT NOT NULL,
 			applied_at TEXT NOT NULL,
 			applied_by TEXT NOT NULL
-		)`,
+		)`, d.dial.autoPK()),
 		`CREATE TABLE IF NOT EXISTS ormpp_instances (
 			instance_id TEXT PRIMARY KEY,
 			hostname TEXT NOT NULL,
@@ -326,59 +326,59 @@ func (d *DB) bootstrapSystemTables(ctx context.Context) error {
 			started_at TEXT NOT NULL,
 			last_heartbeat TEXT NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS ormpp_leases (
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS ormpp_leases (
 			name TEXT PRIMARY KEY,
 			holder TEXT NOT NULL,
-			fencing_token INTEGER NOT NULL,
+			fencing_token %s NOT NULL,
 			expires_at TEXT NOT NULL
-		)`,
+		)`, d.dial.columnType(kInt)),
 		`CREATE TABLE IF NOT EXISTS ormpp_deprecated (
 			model TEXT NOT NULL,
 			column_name TEXT NOT NULL,
 			deprecated_in INTEGER NOT NULL,
 			PRIMARY KEY (model, column_name)
 		)`,
-		`CREATE TABLE IF NOT EXISTS ormpp_migration_progress (
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS ormpp_migration_progress (
 			version INTEGER NOT NULL,
 			step TEXT NOT NULL,
 			geo TEXT NOT NULL,
 			last_key TEXT NOT NULL DEFAULT '',
-			rows_done INTEGER NOT NULL DEFAULT 0,
+			rows_done %s NOT NULL DEFAULT 0,
 			state TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY (version, step, geo)
-		)`,
-		`CREATE TABLE IF NOT EXISTS ormpp_dualwrite_queue (
-			id INTEGER PRIMARY KEY,
+		)`, d.dial.columnType(kInt)),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS ormpp_dualwrite_queue (
+			id %s,
 			tbl TEXT NOT NULL,
 			pk TEXT NOT NULL,
 			op TEXT NOT NULL,
 			changed_at TEXT NOT NULL
-		)`,
+		)`, d.dial.autoPK()),
 		`CREATE TABLE IF NOT EXISTS ormpp_tenants (
 			tenant_id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
 			status TEXT NOT NULL CHECK (status IN ('active','archived')),
 			created_at TEXT NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS ormpp_event_types (
-			type_id INTEGER PRIMARY KEY,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS ormpp_event_types (
+			type_id %s PRIMARY KEY,
 			type TEXT NOT NULL UNIQUE
-		)`,
-		`CREATE TABLE IF NOT EXISTS ormpp_checkpoints (
+		)`, d.dial.columnType(kInt)),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS ormpp_checkpoints (
 			consumer TEXT NOT NULL,
 			geo TEXT NOT NULL,
-			seq INTEGER NOT NULL,
+			seq %s NOT NULL,
 			PRIMARY KEY (consumer, geo)
-		)`,
+		)`, d.dial.columnType(kInt)),
 	}
 	for _, s := range stmts {
-		if _, err := d.sql.ExecContext(ctx, s); err != nil {
+		if _, err := d.q().ExecContext(ctx, s); err != nil {
 			return fmt.Errorf("orm: Systemtabellen anlegen: %w", err)
 		}
 	}
 	// Bestands-DBs aus Phase 1/2: neue Zustandsspalten additiv ergänzen.
-	cols, err := d.dial.tableColumns(d.sql, "ormpp_schema_state")
+	cols, err := d.dial.tableColumns(d.q(), "ormpp_schema_state")
 	if err != nil {
 		return err
 	}
@@ -391,7 +391,7 @@ func (d *DB) bootstrapSystemTables(ctx context.Context) error {
 		"phase":          `ALTER TABLE ormpp_schema_state ADD COLUMN phase TEXT NOT NULL DEFAULT 'idle'`,
 	} {
 		if !have[col] {
-			if _, err := d.sql.ExecContext(ctx, ddl); err != nil {
+			if _, err := d.q().ExecContext(ctx, ddl); err != nil {
 				return fmt.Errorf("orm: ormpp_schema_state erweitern: %w", err)
 			}
 		}

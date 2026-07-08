@@ -184,7 +184,7 @@ func (r *repo[T]) InsertMany(ctx context.Context, entities []*T, opts ...BatchOp
 	return nil
 }
 
-func (r *repo[T]) get(ctx context.Context, id ID) (*T, error) {
+func (r *repo[T]) get(ctx context.Context, id ID, lock bool) (*T, error) {
 	tenant, _, err := r.scope(ctx)
 	if err != nil {
 		return nil, err
@@ -195,6 +195,9 @@ func (r *repo[T]) get(ctx context.Context, id ID) (*T, error) {
 	if r.m.tenanted() {
 		query += ` AND tenant_id = ?`
 		args = append(args, tenant.String())
+	}
+	if lock {
+		query += r.h.db().dial.forUpdate()
 	}
 	rows, err := r.h.q().QueryContext(ctx, query, args...)
 	if err != nil {
@@ -210,15 +213,15 @@ func (r *repo[T]) get(ctx context.Context, id ID) (*T, error) {
 	return list[0], nil
 }
 
-func (r *repo[T]) Get(ctx context.Context, id ID) (*T, error) { return r.get(ctx, id) }
+func (r *repo[T]) Get(ctx context.Context, id ID) (*T, error) { return r.get(ctx, id, false) }
 
 func (r *repo[T]) GetForUpdate(ctx context.Context, id ID) (*T, error) {
 	if !r.h.inTx() {
 		return nil, ErrRequiresTx
 	}
-	// SQLite: die Transaktion (txlock=immediate) hält bereits die Schreibsperre;
-	// auf PG/YB ergänzt der Dialekt hier FOR UPDATE (Phase 4).
-	return r.get(ctx, id)
+	// PG/YB: SELECT … FOR UPDATE; SQLite emuliert über die serialisierte
+	// Schreib-Connection (txlock=immediate) — verhaltensgleich.
+	return r.get(ctx, id, true)
 }
 
 func (r *repo[T]) Update(ctx context.Context, e *T) error {
@@ -283,7 +286,7 @@ func (r *repo[T]) Update(ctx context.Context, e *T) error {
 	if n == 0 {
 		// Existenz entscheidet: Versionskonflikt oder nicht gefunden.
 		if r.m.version != nil {
-			if _, gerr := r.get(ctx, pk); gerr == nil {
+			if _, gerr := r.get(ctx, pk, false); gerr == nil {
 				rv.FieldByIndex(r.m.version.index).SetInt(oldVersion) // zurückrollen
 				return ErrVersionConflict
 			}

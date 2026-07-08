@@ -19,7 +19,7 @@ variables:
     fallback_keys:
       - go-develop
 
-# Format-Check, Vet und Tests mit Race-Detector und Coverage.
+# Format-Check, Vet und Tests mit Race-Detector und Coverage (SQLite).
 test:
   stage: test
   image: golang:1.26
@@ -35,6 +35,48 @@ test:
     paths:
       - coverage.txt
     expire_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# Identische Verhaltenssuite gegen PostgreSQL (Verhaltensgleichheit, Phase 4).
+test-postgres:
+  stage: test
+  image: golang:1.26
+  <<: *go-cache
+  services:
+    - name: postgres:17-alpine
+      alias: postgres
+  variables:
+    POSTGRES_USER: orm
+    POSTGRES_PASSWORD: orm
+    POSTGRES_DB: orm
+    ORMPP_TEST_BACKEND: postgres
+    ORMPP_TEST_DSN: postgres://orm:orm@postgres:5432/orm
+  script:
+    - go test -race ./...
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# Identische Verhaltenssuite gegen YugabyteDB (YSQL).
+test-yugabyte:
+  stage: test
+  image: golang:1.26
+  <<: *go-cache
+  services:
+    - name: yugabytedb/yugabyte:2025.2.4.0-b122
+      alias: yugabyte
+      command: ["bin/yugabyted", "start", "--background=false"]
+  variables:
+    ORMPP_TEST_BACKEND: yugabyte
+    ORMPP_TEST_DSN: postgres://yugabyte@yugabyte:5433/yugabyte
+  script:
+    # Warten, bis YSQL antwortet (yugabyted braucht nach dem Start etwas).
+    - for i in $(seq 1 90); do (echo > /dev/tcp/yugabyte/5433) 2>/dev/null && break; sleep 2; done
+    - go test -race ./...
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH

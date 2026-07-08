@@ -5,7 +5,27 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 
 ## Aktueller Schritt
 
-**Phase 3 abgeschlossen** (Migrations-Engine auf SQLite, alle Tests + Lint grün). Nächster Schritt: Phase 4 — PostgreSQL- und YugabyteDB-Adapter (pgx, identische Testsuite gegen alle drei Backends in CI, Partitionierung, Archivierung).
+**Phase 4 (Kern) abgeschlossen**: PostgreSQL- und YugabyteDB-Adapter (pgx), identische Verhaltenssuite läuft gegen alle drei Backends (lokal via docker-compose, in CI als Services). Offen aus Phase 4: native Partitionierung der Event-Tabellen und Archivierung (siehe Notizen). Nächster Schritt: Phase 4b (Partitionierung/Archivierung) oder Phase 5 — v1.0-Härtung.
+
+## Phase-4-Arbeitsplan (Reihenfolge)
+
+| # | Schritt | Status |
+|---|---|---|
+| 4.1 | pgx-Treiber (`orm.Postgres`, `orm.Yugabyte` über PG-Wire), Ping bei Open, Pool-Defaults | ✅ |
+| 4.2 | Dialekt-Erweiterung: `rebind` (?→$n), `columnType`/`zeroLiteral` (BIGINT/JSONB/BYTEA/DOUBLE), `autoPK`, `limitAll`, `forUpdate`, Trigger-DDL | ✅ |
+| 4.3 | Alle Engine-Statements durch den Rebind-Wrapper (`dialq`) geroutet — ein Codepfad, zwei Platzhalter-Stile | ✅ |
+| 4.4 | `GetForUpdate` nativ (`SELECT … FOR UPDATE` auf PG/YB; SQLite emuliert weiter) | ✅ |
+| 4.5 | Append unter echter Nebenläufigkeit: PK-Verletzung → `ErrVersionConflict`, Geo-Seq-Kollision → transparenter Retry | ✅ |
+| 4.6 | Dual-Write-Trigger auf PG/YB als plpgsql-Funktion + Zeilen-Trigger | ✅ |
+| 4.7 | Test-Matrix: `ORMPP_TEST_BACKEND`/`ORMPP_TEST_DSN`, Schema-pro-Test-Isolation (search_path), docker-compose.yml, CI-Jobs test-postgres/test-yugabyte | ✅ |
+
+## Phase-4-Notizen (Entscheidungen & bewusste Grenzen)
+
+- **Neue Dependency `github.com/jackc/pgx/v5`** (stdlib-Modus) — laut ROADMAP Phase 4 vorgesehen.
+- **Speicherformate bleiben backend-neutral**: IDs/Zeit als TEXT, bool als BIGINT (0/1), `json`-Tag als JSONB auf PG/YB (TEXT auf SQLite) — Verhalten identisch, decodeField versteht beides.
+- **Platzhalter-Strategie:** Engine schreibt überall `?`; `dialq` rebindet pro Dialekt ($n auf PG/YB). String-Literale bleiben unangetastet.
+- **Offen (Phase 4b):** native `PARTITION BY LIST (geo)` der Event-Tabellen (erfordert Partition-Key im PK — Schemaänderung), Archiv-Partitionen/-Nebentabellen, `ormpp_geo_regions`-Lebenszyklus, Leases für Projektions-Worker über Instanzen hinweg (`FOR UPDATE SKIP LOCKED`-Optimierung), Typ-Wörterbuch-Registrierung unter paralleler Migration mehrerer Instanzen.
+- **Poison-Rows/Dead-Letter und `MigrationStatus`/`Health`** weiterhin Phase 5.
 
 ## Phase-3-Arbeitsplan (Reihenfolge)
 

@@ -2,7 +2,7 @@
 
 Verbindliche Spezifikation der öffentlichen Go-API von ORM++. Dieses Dokument ist der Vertrag, gegen den implementiert wird; Abweichungen in der Implementierung sind Fehler oder müssen hier nachgezogen werden. Architektur-Hintergründe und physisches Schema: siehe [ROADMAP.md](ROADMAP.md).
 
-**Status:** Phase 1 (CRUD) und Phase 2 (Event Sourcing) auf SQLite implementiert. Import-Pfad:
+**Status:** Phasen 1–4 implementiert — CRUD, Event Sourcing und Migrations-Engine laufen verhaltensgleich auf SQLite, PostgreSQL und YugabyteDB (identische Testsuite). Offen: native Partitionierung/Archivierung (4b), v1.0-Härtung (Phase 5). Import-Pfad:
 
 ```go
 import orm "gitlab.techeve.de/orm-plus-plus/orm-plus-plus"

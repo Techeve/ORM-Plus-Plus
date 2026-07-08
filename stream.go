@@ -142,7 +142,7 @@ func Watch[T any](ctx context.Context, h Handle, opts ...StreamOption) <-chan Cl
 		}
 		// Nachzügler ab der Position aus dem Log, dann live weiter.
 		if len(so.from.seqs) > 0 {
-			_ = d.replayEvents(ctx, d.sql, m, tenant, delivered, func(ce CloudEvent) bool {
+			_ = d.replayEvents(ctx, d.q(), m, tenant, delivered, func(ce CloudEvent) bool {
 				select {
 				case out <- ce:
 					return true

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -48,7 +47,7 @@ func ticketEvents() ModelOption {
 
 func esTestDB(t *testing.T, opts ...ModelOption) (*DB, context.Context) {
 	t.Helper()
-	db, err := Open(SQLite(filepath.Join(t.TempDir(), "es.db")))
+	db, err := Open(newTestStore(t)())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -239,7 +238,7 @@ func TestSnapshotsCreatedUsedAndPruned(t *testing.T) {
 
 	// Beweis, dass Load den Snapshot nutzt: alte Events entfernen (simuliert
 	// Archivierung) — der Zustand muss trotzdem vollständig sein.
-	if _, err := db.sql.Exec(`DELETE FROM ticket_events WHERE aggregate_seq <= ?`, maxSeq); err != nil {
+	if _, err := db.q().ExecContext(context.Background(), `DELETE FROM ticket_events WHERE aggregate_seq <= ?`, maxSeq); err != nil {
 		t.Fatalf("Events löschen: %v", err)
 	}
 	loaded, err := Load[Ticket](ctx, db, tk.ID())
@@ -441,12 +440,11 @@ func TestStreamAndWatch(t *testing.T) {
 type NoteAddedV1 struct{ Text string }
 
 func TestUpcasterChainAndValidation(t *testing.T) {
-	dir := t.TempDir()
-	file := filepath.Join(dir, "up.db")
+	store := newTestStore(t)
 	bg := context.Background()
 
 	// Alte App-Version: note_added v1 mit Feld "Text".
-	db1, err := Open(SQLite(file))
+	db1, err := Open(store())
 	if err != nil {
 		t.Fatalf("Open v1: %v", err)
 	}
@@ -465,13 +463,13 @@ func TestUpcasterChainAndValidation(t *testing.T) {
 	}
 	// v1-Payload direkt anhängen (Apply kennt ihn nicht — macht nichts,
 	// wir prüfen das Upcasting beim späteren Lesen).
-	if _, err := db1.sql.Exec(
+	if _, err := db1.q().ExecContext(bg,
 		`INSERT INTO ticket_events (aggregate_id, aggregate_seq, geo, seq, event_id, occurred_at, type_id, data, tenant_id)
 		 SELECT aggregate_id, 2, geo, 2, ?, occurred_at, type_id, '{"Text":"alte Notiz"}', tenant_id
 		 FROM ticket_events WHERE aggregate_seq = 1`, NewID().String()); err != nil {
 		t.Fatalf("v1-Event einfügen: %v", err)
 	}
-	if _, err := db1.sql.Exec(
+	if _, err := db1.q().ExecContext(bg,
 		`UPDATE ticket_events SET type_id = (SELECT type_id FROM ormpp_event_types WHERE type LIKE '%.ticket.note_added.v1') WHERE aggregate_seq = 2`); err != nil {
 		t.Fatalf("type_id setzen: %v", err)
 	}
@@ -479,7 +477,7 @@ func TestUpcasterChainAndValidation(t *testing.T) {
 	db1.Close()
 
 	// Neue App-Version ohne Upcaster ⇒ Migrate schlägt fehl.
-	db2, err := Open(SQLite(file))
+	db2, err := Open(store())
 	if err != nil {
 		t.Fatalf("Open v2: %v", err)
 	}
@@ -494,7 +492,7 @@ func TestUpcasterChainAndValidation(t *testing.T) {
 	db2.Close()
 
 	// Mit Upcaster: Migrate läuft, alte Events werden beim Lesen gehoben.
-	db3, err := Open(SQLite(file))
+	db3, err := Open(store())
 	if err != nil {
 		t.Fatalf("Open v3: %v", err)
 	}
@@ -526,7 +524,7 @@ func TestESRegistrationValidation(t *testing.T) {
 	type NoAgg struct {
 		Title string
 	}
-	db, _ := Open(SQLite(filepath.Join(t.TempDir(), "v.db")))
+	db, _ := Open(newTestStore(t)())
 	defer db.Close()
 	Register[NoAgg](db, EventSourced(), Events(E[TicketOpened]("x.opened")))
 	if err := db.Migrate(bg); err == nil {
@@ -534,7 +532,7 @@ func TestESRegistrationValidation(t *testing.T) {
 	}
 
 	// Ohne Events-Deklaration.
-	db2, _ := Open(SQLite(filepath.Join(t.TempDir(), "v2.db")))
+	db2, _ := Open(newTestStore(t)())
 	defer db2.Close()
 	Register[Ticket](db2, EventSourced())
 	if err := db2.Migrate(bg); err == nil {

@@ -155,7 +155,7 @@ func (td *typeDict) typeOf(id int64) (string, bool) {
 // deklarierten Event-Typen aller ES-Modelle.
 func (d *DB) bootstrapEventTypes(ctx context.Context) error {
 	dict := &typeDict{byID: map[int64]string{}, byName: map[string]int64{}}
-	rows, err := d.sql.QueryContext(ctx, `SELECT type_id, type FROM ormpp_event_types`)
+	rows, err := d.q().QueryContext(ctx, `SELECT type_id, type FROM ormpp_event_types`)
 	if err != nil {
 		return err
 	}
@@ -194,7 +194,7 @@ func (d *DB) bootstrapEventTypes(ctx context.Context) error {
 			if _, ok := dict.byName[full]; ok {
 				continue
 			}
-			if _, err := d.sql.ExecContext(ctx,
+			if _, err := d.q().ExecContext(ctx,
 				`INSERT INTO ormpp_event_types (type_id, type) VALUES (?, ?)`, next, full); err != nil {
 				return fmt.Errorf("orm: Event-Typ %q registrieren: %w", full, err)
 			}

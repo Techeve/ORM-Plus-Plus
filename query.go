@@ -165,7 +165,7 @@ func (q *queryBuilder[T]) build() (where string, args []any, tail string, err er
 	}
 	if q.offset > 0 {
 		if q.limit <= 0 {
-			t.WriteString(" LIMIT -1")
+			fmt.Fprintf(&t, " LIMIT %s", q.r.h.db().dial.limitAll())
 		}
 		fmt.Fprintf(&t, " OFFSET %d", q.offset)
 	}

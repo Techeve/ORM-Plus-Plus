@@ -32,7 +32,7 @@ func newTenantRegistry(d *DB) *TenantRegistry {
 
 // bootstrap legt den SingleTenant an und lädt den Verifikations-Cache.
 func (t *TenantRegistry) bootstrap(ctx context.Context) error {
-	_, err := t.d.sql.ExecContext(ctx, `
+	_, err := t.d.q().ExecContext(ctx, `
 		INSERT INTO ormpp_tenants (tenant_id, name, status, created_at)
 		VALUES (?, 'single', 'active', ?) ON CONFLICT (tenant_id) DO NOTHING`,
 		SingleTenant.String(), time.Now().UTC().Format(time.RFC3339Nano))
@@ -43,7 +43,7 @@ func (t *TenantRegistry) bootstrap(ctx context.Context) error {
 }
 
 func (t *TenantRegistry) reload(ctx context.Context) error {
-	rows, err := t.d.sql.QueryContext(ctx, `SELECT tenant_id, status FROM ormpp_tenants`)
+	rows, err := t.d.q().QueryContext(ctx, `SELECT tenant_id, status FROM ormpp_tenants`)
 	if err != nil {
 		return err
 	}
@@ -84,7 +84,7 @@ func (t *TenantRegistry) Create(ctx context.Context, info TenantInfo) (TenantInf
 	}
 	info.Status = "active"
 	info.CreatedAt = time.Now().UTC()
-	_, err := t.d.sql.ExecContext(ctx, `
+	_, err := t.d.q().ExecContext(ctx, `
 		INSERT INTO ormpp_tenants (tenant_id, name, status, created_at) VALUES (?, ?, ?, ?)`,
 		info.ID.String(), info.Name, info.Status, info.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
@@ -98,14 +98,14 @@ func (t *TenantRegistry) Create(ctx context.Context, info TenantInfo) (TenantInf
 
 // Get liest einen Tenant.
 func (t *TenantRegistry) Get(ctx context.Context, id ID) (TenantInfo, error) {
-	row := t.d.sql.QueryRowContext(ctx,
+	row := t.d.q().QueryRowContext(ctx,
 		`SELECT tenant_id, name, status, created_at FROM ormpp_tenants WHERE tenant_id = ?`, id.String())
 	return scanTenant(row)
 }
 
 // List liefert alle Tenants.
 func (t *TenantRegistry) List(ctx context.Context) ([]TenantInfo, error) {
-	rows, err := t.d.sql.QueryContext(ctx,
+	rows, err := t.d.q().QueryContext(ctx,
 		`SELECT tenant_id, name, status, created_at FROM ormpp_tenants ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -125,7 +125,7 @@ func (t *TenantRegistry) List(ctx context.Context) ([]TenantInfo, error) {
 // Archive archiviert einen Tenant: neue Schreibvorgänge werden blockiert,
 // Bestandsdaten bleiben lesbar. Kein Hard-Delete.
 func (t *TenantRegistry) Archive(ctx context.Context, id ID) error {
-	res, err := t.d.sql.ExecContext(ctx,
+	res, err := t.d.q().ExecContext(ctx,
 		`UPDATE ormpp_tenants SET status = 'archived' WHERE tenant_id = ?`, id.String())
 	if err != nil {
 		return err

@@ -29,7 +29,7 @@ type schemaState struct {
 
 func (d *DB) readSchemaState(ctx context.Context) (schemaState, error) {
 	var st schemaState
-	row := d.sql.QueryRowContext(ctx,
+	row := d.q().QueryRowContext(ctx,
 		`SELECT schema_version, target_version, phase, models_checksum FROM ormpp_schema_state WHERE id = 1`)
 	switch err := row.Scan(&st.current, &st.target, &st.phase, &st.checksum); err {
 	case nil:
@@ -59,14 +59,14 @@ func (d *DB) setPhase(ctx context.Context, st *schemaState, phase string) error 
 		from = phaseIdle
 	}
 	st.phase = phase
-	if err := d.writeSchemaState(ctx, d.sql, *st); err != nil {
+	if err := d.writeSchemaState(ctx, d.q(), *st); err != nil {
 		return err
 	}
 	version := st.target
 	if version == 0 {
 		version = st.current
 	}
-	_, err := d.sql.ExecContext(ctx, `
+	_, err := d.q().ExecContext(ctx, `
 		INSERT INTO ormpp_schema_history (version, phase_from, phase_to, applied_at, applied_by)
 		VALUES (?, ?, ?, ?, ?)`,
 		version, from, phase, nowUTC().Format(time.RFC3339Nano), d.instanceID.String())
@@ -221,7 +221,7 @@ func (d *DB) markDeprecated(ctx context.Context, version int) error {
 			if !f.deprecated {
 				continue
 			}
-			if _, err := d.sql.ExecContext(ctx, `
+			if _, err := d.q().ExecContext(ctx, `
 				INSERT INTO ormpp_deprecated (model, column_name, deprecated_in) VALUES (?, ?, ?)
 				ON CONFLICT (model, column_name) DO NOTHING`, m.name, f.column, version); err != nil {
 				return err
@@ -233,23 +233,12 @@ func (d *DB) markDeprecated(ctx context.Context, version int) error {
 
 // createDualWriteTriggers legt Insert/Update/Delete-Trigger auf die alte
 // Tabelle: jede Änderung einer Alt-Instanz landet in der Nachlauf-Queue.
+// Die Trigger-DDL liefert der Dialekt (SQLite: drei Trigger; PG/YB:
+// plpgsql-Funktion + Zeilen-Trigger).
 func (d *DB) createDualWriteTriggers(ctx context.Context, cr *compiledReplace) error {
 	t := cr.oldM.table
-	pk := cr.oldM.pk.column
-	now := `strftime('%Y-%m-%dT%H:%M:%fZ','now')`
-	stmts := []string{
-		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %q AFTER INSERT ON %q BEGIN
-			INSERT INTO ormpp_dualwrite_queue (tbl, pk, op, changed_at) VALUES ('%s', NEW.%q, 'upsert', %s);
-		END`, "ormpp_dw_"+t+"_ins", t, t, pk, now),
-		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %q AFTER UPDATE ON %q BEGIN
-			INSERT INTO ormpp_dualwrite_queue (tbl, pk, op, changed_at) VALUES ('%s', NEW.%q, 'upsert', %s);
-		END`, "ormpp_dw_"+t+"_upd", t, t, pk, now),
-		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %q AFTER DELETE ON %q BEGIN
-			INSERT INTO ormpp_dualwrite_queue (tbl, pk, op, changed_at) VALUES ('%s', OLD.%q, 'delete', %s);
-		END`, "ormpp_dw_"+t+"_del", t, t, pk, now),
-	}
-	for _, stmt := range stmts {
-		if _, err := d.sql.ExecContext(ctx, stmt); err != nil {
+	for _, stmt := range d.dial.dualWriteTriggerSQL(t, cr.oldM.pk.column) {
+		if _, err := d.q().ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("orm: Dual-Write-Trigger auf %s: %w", t, err)
 		}
 	}
@@ -385,7 +374,7 @@ func (d *DB) backfillReplace(ctx context.Context, version int, cr *compiledRepla
 			cond = fmt.Sprintf("WHERE %q > ?", cr.oldM.pk.column)
 			args = append(args, last)
 		}
-		batch, err := d.queryOldRows(ctx, d.sql, cr.oldM, cond, args, plan.BatchSize)
+		batch, err := d.queryOldRows(ctx, d.q(), cr.oldM, cond, args, plan.BatchSize)
 		if err != nil {
 			return err
 		}
@@ -408,7 +397,7 @@ func (d *DB) backfillReplace(ctx context.Context, version int, cr *compiledRepla
 		last = batch[len(batch)-1].pk
 		throttleBatch(plan.Throttle, len(batch), started)
 	}
-	return d.writeProgress(ctx, d.sql, version, cr.name, last, done, "done")
+	return d.writeProgress(ctx, d.q(), version, cr.name, last, done, "done")
 }
 
 // runBatchScript führt ein Skript aus; den Checkpoint verwaltet das Skript
@@ -429,7 +418,7 @@ func (d *DB) runBatchScript(ctx context.Context, version int, bs *batchScript) e
 	if err != nil {
 		return err
 	}
-	return d.writeProgress(ctx, d.sql, version, step, p.lastKey, p.rowsDone, "done")
+	return d.writeProgress(ctx, d.q(), version, step, p.lastKey, p.rowsDone, "done")
 }
 
 func throttleBatch(rate Rate, n int, started time.Time) {
@@ -461,7 +450,7 @@ func (d *DB) drainDualWrite(ctx context.Context) error {
 		}
 		var batch []qrow
 		{
-			rows, err := d.sql.QueryContext(ctx,
+			rows, err := d.q().QueryContext(ctx,
 				`SELECT id, tbl, pk, op FROM ormpp_dualwrite_queue ORDER BY id LIMIT 200`)
 			if err != nil {
 				return err
@@ -491,7 +480,7 @@ func (d *DB) drainDualWrite(ctx context.Context) error {
 			if err := d.applyQueued(ctx, cr, r.pk, r.op); err != nil {
 				return err
 			}
-			if _, err := d.sql.ExecContext(ctx, `DELETE FROM ormpp_dualwrite_queue WHERE id = ?`, r.id); err != nil {
+			if _, err := d.q().ExecContext(ctx, `DELETE FROM ormpp_dualwrite_queue WHERE id = ?`, r.id); err != nil {
 				return err
 			}
 			progressed = true
@@ -504,22 +493,22 @@ func (d *DB) drainDualWrite(ctx context.Context) error {
 
 func (d *DB) applyQueued(ctx context.Context, cr *compiledReplace, pk, op string) error {
 	if op == "delete" {
-		_, err := d.sql.ExecContext(ctx,
+		_, err := d.q().ExecContext(ctx,
 			fmt.Sprintf("DELETE FROM %q WHERE %q = ?", cr.newM.table, cr.newM.pk.column), pk)
 		return err
 	}
 	cond := fmt.Sprintf("WHERE %q = ?", cr.oldM.pk.column)
-	rows, err := d.queryOldRows(ctx, d.sql, cr.oldM, cond, []any{pk}, 1)
+	rows, err := d.queryOldRows(ctx, d.q(), cr.oldM, cond, []any{pk}, 1)
 	if err != nil {
 		return err
 	}
 	if len(rows) == 0 {
 		// Zeile inzwischen gelöscht — Delete nachziehen.
-		_, err := d.sql.ExecContext(ctx,
+		_, err := d.q().ExecContext(ctx,
 			fmt.Sprintf("DELETE FROM %q WHERE %q = ?", cr.newM.table, cr.newM.pk.column), pk)
 		return err
 	}
-	return d.transformAndUpsert(ctx, d.sql, cr, rows[0])
+	return d.transformAndUpsert(ctx, d.q(), cr, rows[0])
 }
 
 // --- Finalisierung ---
@@ -574,10 +563,10 @@ func (d *DB) FinalizeMigration(ctx context.Context, version int) error {
 	d.dwMu.Unlock()
 	for tbl := range active {
 		// Trigger fallen mit der Tabelle.
-		if _, err := d.sql.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %q", tbl)); err != nil {
+		if _, err := d.q().ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %q", tbl)); err != nil {
 			return fmt.Errorf("orm: Alt-Tabelle %s entfernen: %w", tbl, err)
 		}
-		if _, err := d.sql.ExecContext(ctx, `DELETE FROM ormpp_dualwrite_queue WHERE tbl = ?`, tbl); err != nil {
+		if _, err := d.q().ExecContext(ctx, `DELETE FROM ormpp_dualwrite_queue WHERE tbl = ?`, tbl); err != nil {
 			return err
 		}
 	}
@@ -597,7 +586,7 @@ func (d *DB) dropRemovedDeprecated(ctx context.Context) error {
 	type entry struct{ model, column string }
 	var entries []entry
 	{
-		rows, err := d.sql.QueryContext(ctx, `SELECT model, column_name FROM ormpp_deprecated`)
+		rows, err := d.q().QueryContext(ctx, `SELECT model, column_name FROM ormpp_deprecated`)
 		if err != nil {
 			return err
 		}
@@ -618,7 +607,7 @@ func (d *DB) dropRemovedDeprecated(ctx context.Context) error {
 		m := d.reg.byName[e.model]
 		if m == nil {
 			// Model existiert nicht mehr (z. B. ersetzt) — Eintrag erledigt.
-			if _, err := d.sql.ExecContext(ctx,
+			if _, err := d.q().ExecContext(ctx,
 				`DELETE FROM ormpp_deprecated WHERE model = ? AND column_name = ?`, e.model, e.column); err != nil {
 				return err
 			}
@@ -627,20 +616,20 @@ func (d *DB) dropRemovedDeprecated(ctx context.Context) error {
 		if m.fieldByColumn(e.column) != nil {
 			continue // Feld noch im Struct — Spalte bleibt bis zur nächsten Contract-Runde
 		}
-		cols, err := d.dial.tableColumns(d.sql, m.table)
+		cols, err := d.dial.tableColumns(d.q(), m.table)
 		if err != nil {
 			return err
 		}
 		for _, c := range cols {
 			if c == e.column {
 				stmt := fmt.Sprintf("ALTER TABLE %q DROP COLUMN %q", m.table, e.column)
-				if _, err := d.sql.ExecContext(ctx, stmt); err != nil {
+				if _, err := d.q().ExecContext(ctx, stmt); err != nil {
 					return fmt.Errorf("orm: deprecated-Spalte %s.%s entfernen: %w", m.table, e.column, err)
 				}
 				break
 			}
 		}
-		if _, err := d.sql.ExecContext(ctx,
+		if _, err := d.q().ExecContext(ctx,
 			`DELETE FROM ormpp_deprecated WHERE model = ? AND column_name = ?`, e.model, e.column); err != nil {
 			return err
 		}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -35,11 +34,11 @@ type Account struct { // Model der neuen Generation (Schema v2)
 }
 
 func TestMigrationExpandContractTwoInstances(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "mig.db")
+	store := newTestStore(t)
 	bg := context.Background()
 
 	// Alte Generation (v1) startet und schreibt Bestandsdaten.
-	db1, err := Open(SQLite(file))
+	db1, err := Open(store())
 	if err != nil {
 		t.Fatalf("Open v1: %v", err)
 	}
@@ -58,7 +57,7 @@ func TestMigrationExpandContractTwoInstances(t *testing.T) {
 	}
 
 	// Neue Generation (v2) migriert online, während v1 weiterläuft.
-	db2, err := Open(SQLite(file))
+	db2, err := Open(store())
 	if err != nil {
 		t.Fatalf("Open v2: %v", err)
 	}
@@ -141,7 +140,7 @@ func TestMigrationExpandContractTwoInstances(t *testing.T) {
 }
 
 func TestAdditiveDeprecatedLifecycle(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "dep.db")
+	store := newTestStore(t)
 	bg := context.Background()
 	ctx := WithTenant(bg, SingleTenant)
 
@@ -152,7 +151,7 @@ func TestAdditiveDeprecatedLifecycle(t *testing.T) {
 			Name   string `orm:"required"`
 			Legacy string
 		}
-		db, err := Open(SQLite(file))
+		db, err := Open(store())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -175,7 +174,7 @@ func TestAdditiveDeprecatedLifecycle(t *testing.T) {
 			Legacy string `orm:"deprecated"`
 			Color  string
 		}
-		db, err := Open(SQLite(file))
+		db, err := Open(store())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -197,7 +196,7 @@ func TestAdditiveDeprecatedLifecycle(t *testing.T) {
 			t.Fatalf("Finalize v2: %v", err)
 		}
 		// deprecated + noch im Struct ⇒ Spalte bleibt.
-		cols, _ := db.dial.tableColumns(db.sql, "gadget")
+		cols, _ := db.dial.tableColumns(db.q(), "gadget")
 		if !containsStr(cols, "legacy") {
 			t.Fatal("legacy-Spalte darf erst fallen, wenn das Feld aus dem Struct ist")
 		}
@@ -211,7 +210,7 @@ func TestAdditiveDeprecatedLifecycle(t *testing.T) {
 			Name  string `orm:"required"`
 			Color string
 		}
-		db, err := Open(SQLite(file))
+		db, err := Open(store())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -224,7 +223,7 @@ func TestAdditiveDeprecatedLifecycle(t *testing.T) {
 		if err := db.FinalizeMigration(bg, 3); err != nil {
 			t.Fatalf("Finalize v3: %v", err)
 		}
-		cols, _ := db.dial.tableColumns(db.sql, "gadget")
+		cols, _ := db.dial.tableColumns(db.q(), "gadget")
 		if containsStr(cols, "legacy") {
 			t.Fatal("legacy-Spalte wurde bei Finalize nicht entfernt")
 		}
@@ -245,7 +244,7 @@ func containsStr(list []string, s string) bool {
 }
 
 func TestBatchScriptCheckpointResume(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "batch.db")
+	store := newTestStore(t)
 	bg := context.Background()
 
 	type Item struct {
@@ -254,7 +253,7 @@ func TestBatchScriptCheckpointResume(t *testing.T) {
 	}
 
 	// v1 anlegen.
-	db1, err := Open(SQLite(file))
+	db1, err := Open(store())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +268,7 @@ func TestBatchScriptCheckpointResume(t *testing.T) {
 	calls := 0
 	var resumedFrom string
 	newDB := func() *DB {
-		db, err := Open(SQLite(file))
+		db, err := Open(store())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -317,11 +316,11 @@ func TestBatchScriptCheckpointResume(t *testing.T) {
 }
 
 func TestLeasesAndInstanceRegister(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "lease.db")
+	store := newTestStore(t)
 	bg := context.Background()
 
 	open := func() *DB {
-		db, err := Open(SQLite(file))
+		db, err := Open(store())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -377,7 +376,7 @@ func TestLeasesAndInstanceRegister(t *testing.T) {
 	if err := db2.sql.QueryRow(`SELECT COUNT(*) FROM ormpp_instances`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("Instanzregister nach Close: %d (%v), erwartet 1", n, err)
 	}
-	if err := db2.sql.QueryRow(`SELECT COUNT(*) FROM ormpp_leases WHERE holder = ?`, db1.instanceID.String()).Scan(&n); err != nil || n != 0 {
+	if err := db2.q().QueryRowContext(bg, `SELECT COUNT(*) FROM ormpp_leases WHERE holder = ?`, db1.instanceID.String()).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("Leases nach Close: %d (%v), erwartet 0", n, err)
 	}
 }

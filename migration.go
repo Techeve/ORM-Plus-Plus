@@ -148,7 +148,7 @@ func (b Batch) Checkpoint(ctx context.Context) (string, error) {
 
 // SaveCheckpoint sichert den Fortschritt (wiederaufnehmbar über Neustarts).
 func (b Batch) SaveCheckpoint(ctx context.Context, key string, rowsDone int64) error {
-	return b.d.writeProgress(ctx, b.d.sql, b.version, b.step, key, rowsDone, "running")
+	return b.d.writeProgress(ctx, b.d.q(), b.version, b.step, key, rowsDone, "running")
 }
 
 type batchScript struct {
@@ -174,7 +174,7 @@ type progress struct {
 
 func (d *DB) readProgress(ctx context.Context, version int, step string) (progress, error) {
 	var p progress
-	err := d.sql.QueryRowContext(ctx,
+	err := d.q().QueryRowContext(ctx,
 		`SELECT last_key, rows_done, state FROM ormpp_migration_progress WHERE version = ? AND step = ? AND geo = ?`,
 		version, step, "local").Scan(&p.lastKey, &p.rowsDone, &p.state)
 	switch err {
