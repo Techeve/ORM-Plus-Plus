@@ -9,7 +9,7 @@ import (
 )
 
 // encodeField wandelt einen Go-Feldwert in einen Treiberwert.
-func encodeField(f *field, v reflect.Value) (any, error) {
+func encodeField(d *DB, f *field, v reflect.Value) (any, error) {
 	if f.json {
 		b, err := json.Marshal(v.Interface())
 		if err != nil {
@@ -22,6 +22,16 @@ func encodeField(f *field, v reflect.Value) (any, error) {
 			return nil, nil
 		}
 		v = v.Elem()
+	}
+	if f.encrypted {
+		var plain []byte
+		switch val := v.Interface().(type) {
+		case string:
+			plain = []byte(val)
+		case []byte:
+			plain = val
+		}
+		return encryptValue(d.opts.keys, plain)
 	}
 	switch val := v.Interface().(type) {
 	case ID:
@@ -45,7 +55,7 @@ func encodeField(f *field, v reflect.Value) (any, error) {
 }
 
 // decodeField schreibt einen Treiberwert zurück in ein Go-Feld.
-func decodeField(f *field, target reflect.Value, raw any) error {
+func decodeField(d *DB, f *field, target reflect.Value, raw any) error {
 	if f.json {
 		if raw == nil {
 			target.SetZero()
@@ -72,6 +82,23 @@ func decodeField(f *field, target reflect.Value, raw any) error {
 		target = target.Elem()
 	} else if raw == nil {
 		target.SetZero()
+		return nil
+	}
+
+	if f.encrypted {
+		blob, ok := raw.([]byte)
+		if !ok {
+			return fmt.Errorf("orm: encrypted-Spalte %s: %T statt BLOB", f.column, raw)
+		}
+		plain, err := decryptValue(d.opts.keys, blob)
+		if err != nil {
+			return fmt.Errorf("orm: Spalte %s: %w", f.column, err)
+		}
+		if target.Kind() == reflect.String {
+			target.SetString(string(plain))
+		} else {
+			target.SetBytes(plain)
+		}
 		return nil
 	}
 
@@ -197,7 +224,7 @@ func scanModelRow[T any](h Handle, m *model, rows *sql.Rows) (*T, error) {
 	e := new(T)
 	rv := reflect.ValueOf(e).Elem()
 	for i, f := range m.fields {
-		if err := decodeField(f, rv.FieldByIndex(f.index), raws[i]); err != nil {
+		if err := decodeField(h.db(), f, rv.FieldByIndex(f.index), raws[i]); err != nil {
 			return nil, err
 		}
 	}

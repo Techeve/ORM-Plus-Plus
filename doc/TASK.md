@@ -5,7 +5,15 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 
 ## Aktueller Schritt
 
-**Phase 4 + 4b abgeschlossen**: PostgreSQL-/YugabyteDB-Adapter, native Geo-Partitionierung der Event-Tabellen, Archivierung mit transparenten Union-Reads, Worker-Leases, Topologie-Register — identische Verhaltenssuite grün auf allen drei Backends. Nächster Schritt: Phase 5 — v1.0-Härtung (Encryption, Export/Purge, MigrationStatus/Health, Standalone-Worker-Muster, Lasttests).
+**Phase 5 in Arbeit** (v1.0-Härtung, ein Commit je Baustein):
+
+| # | Baustein | Status |
+|---|---|---|
+| 5.1 | Feld-Verschlüsselung: `encrypted`-Tag (AES-256-GCM, BLOB), `orm.Encryption`/`KeyProvider`/`StaticKey`, Key-ID im Ciphertext (lazy Rotation), nicht filter-/sortierbar, `UpdateSet` engine-seitig; v1: CRUD-Modelle (ES abgelehnt, folgt) | ✅ |
+| 5.2 | `Tenants().Export` — DSGVO-Auszug als JSON Lines (alle Modelle, Events, Snapshots, Archiv; entschlüsselt) | ⏳ |
+| 5.3 | `Tenants().Purge` — physisches Löschen über alle Tabellen, auditiert | — |
+| 5.4 | `MigrationStatus`/`Health` — Observability | — |
+| 5.5 | `SetGeo` (GeoFlexible-Metadaten) + Abschluss-Doku | — |
 
 ## Phase-4b-Arbeitsplan (Reihenfolge)
 

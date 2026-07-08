@@ -49,6 +49,7 @@ type field struct {
 	immutable  bool
 	required   bool
 	deprecated bool
+	encrypted  bool
 	enum       []string
 	defaultVal string
 	hasDefault bool
@@ -323,7 +324,7 @@ func parseField(sf reflect.StructField, tag string) (*field, error) {
 					return nil, fmt.Errorf("unbekanntes ondelete %q", val)
 				}
 			case "encrypted":
-				return nil, fmt.Errorf("encrypted ist noch nicht implementiert (siehe doc/TASK.md)")
+				f.encrypted = true
 			default:
 				return nil, fmt.Errorf("unbekanntes Tag %q", key)
 			}
@@ -359,6 +360,19 @@ func parseField(sf reflect.StructField, tag string) (*field, error) {
 		}
 		if base != idType {
 			return nil, fmt.Errorf("ref-Feld muss orm.ID oder *orm.ID sein")
+		}
+	}
+	if f.encrypted {
+		if f.pk || f.indexed || f.unique || f.json || f.version || f.hasDefault || len(f.enum) > 0 || f.refModel != "" {
+			return nil, fmt.Errorf("encrypted ist nicht kombinierbar mit pk/index/unique/json/version/default/enum/ref (Ciphertext ist nicht vergleichbar)")
+		}
+		base := f.goType
+		if base.Kind() == reflect.Pointer {
+			base = base.Elem()
+		}
+		isBytes := base.Kind() == reflect.Slice && base.Elem().Kind() == reflect.Uint8
+		if base.Kind() != reflect.String && !isBytes {
+			return nil, fmt.Errorf("encrypted nur auf string- oder []byte-Feldern")
 		}
 	}
 	return f, nil
@@ -446,9 +460,9 @@ func (r *registry) checksum() string {
 			fmt.Fprintf(&b, "|index=%s", strings.Join(ix, "+"))
 		}
 		for _, f := range m.fields {
-			fmt.Fprintf(&b, "|f:%s:%s:%s:pk=%t:null=%t:json=%t:enum=%s:def=%s:ref=%s:od=%d:dep=%t",
+			fmt.Fprintf(&b, "|f:%s:%s:%s:pk=%t:null=%t:json=%t:enum=%s:def=%s:ref=%s:od=%d:dep=%t:enc=%t",
 				f.name, f.column, f.goType.String(), f.pk, f.nullable, f.json,
-				strings.Join(f.enum, "|"), f.defaultVal, f.refModel, f.refOn, f.deprecated)
+				strings.Join(f.enum, "|"), f.defaultVal, f.refModel, f.refOn, f.deprecated, f.encrypted)
 		}
 		lines = append(lines, b.String())
 	}

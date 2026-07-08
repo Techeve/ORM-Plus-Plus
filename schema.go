@@ -302,6 +302,8 @@ func colKindOf(f *field) colKind {
 		t = t.Elem()
 	}
 	switch {
+	case f.encrypted:
+		return kBlob // Ciphertext, unabhängig vom Go-Typ
 	case f.json:
 		return kJSON
 	case t == idType, t == timeType:

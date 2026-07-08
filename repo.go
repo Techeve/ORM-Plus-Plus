@@ -88,7 +88,7 @@ func (r *repo[T]) prepareWrite(ctx context.Context, e *T, tenant ID, geo string)
 			return nil, nil, err
 		}
 
-		v, err := encodeField(f, fv)
+		v, err := encodeField(r.h.db(), f, fv)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -256,7 +256,7 @@ func (r *repo[T]) Update(ctx context.Context, e *T) error {
 		if err := r.checkRef(ctx, f, fv, tenant); err != nil {
 			return err
 		}
-		v, err := encodeField(f, fv)
+		v, err := encodeField(r.h.db(), f, fv)
 		if err != nil {
 			return err
 		}

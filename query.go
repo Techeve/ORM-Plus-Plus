@@ -177,6 +177,9 @@ func (q *queryBuilder[T]) column(fieldName string) (string, error) {
 	if f == nil {
 		return "", fmt.Errorf("orm: %s: unbekanntes Feld %q in Query", q.r.m.name, fieldName)
 	}
+	if f.encrypted {
+		return "", fmt.Errorf("orm: %s.%s ist encrypted — nicht filter-/sortierbar (Ciphertext)", q.r.m.name, fieldName)
+	}
 	return f.column, nil
 }
 
@@ -347,6 +350,18 @@ func (q *queryBuilder[T]) UpdateSet(sets ...Assignment) (int64, error) {
 		}
 		if f.pk || f.immutable {
 			return 0, fmt.Errorf("orm: %s.%s ist unveränderlich", q.r.m.name, s.field)
+		}
+		if f.encrypted {
+			// Wert engine-seitig verschlüsseln — mengenbasiert erlaubt,
+			// nur der WHERE-Teil darf keine encrypted-Felder nennen.
+			sv := reflect.ValueOf(s.value)
+			v, err := encodeField(q.r.h.db(), f, sv)
+			if err != nil {
+				return 0, err
+			}
+			assigns = append(assigns, fmt.Sprintf("%q = ?", f.column))
+			vals = append(vals, v)
+			continue
 		}
 		if len(f.enum) > 0 {
 			if sv, ok := s.value.(string); ok {

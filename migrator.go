@@ -286,7 +286,7 @@ func (d *DB) queryOldRows(ctx context.Context, q queryer, m *model, cond string,
 		inst := reflect.New(m.goType)
 		rv := inst.Elem()
 		for i, f := range m.fields {
-			if err := decodeField(f, rv.FieldByIndex(f.index), raws[i]); err != nil {
+			if err := decodeField(d, f, rv.FieldByIndex(f.index), raws[i]); err != nil {
 				return nil, err
 			}
 		}
@@ -330,7 +330,7 @@ func (d *DB) transformAndUpsert(ctx context.Context, q queryer, cr *compiledRepl
 		if err := checkEnum(m, f, fv); err != nil {
 			return err
 		}
-		v, err := encodeField(f, fv)
+		v, err := encodeField(d, f, fv)
 		if err != nil {
 			return err
 		}

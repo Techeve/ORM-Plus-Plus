@@ -211,7 +211,7 @@ func (d *DB) projectAggregate(ctx context.Context, q queryer, m *model, aggID st
 	cols := []string{"id"}
 	vals := []any{aggID}
 	for _, f := range m.fields {
-		v, err := encodeField(f, rv.FieldByIndex(f.index))
+		v, err := encodeField(d, f, rv.FieldByIndex(f.index))
 		if err != nil {
 			return err
 		}

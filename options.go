@@ -18,6 +18,7 @@ type openOptions struct {
 	appVersion          string
 	defaultSnapshotEach int
 	eventTypePrefix     string
+	keys                KeyProvider // orm.Encryption
 }
 
 // OpenOption konfiguriert Open.

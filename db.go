@@ -265,6 +265,21 @@ func (d *DB) Migrate(ctx context.Context, plans ...MigrationPlan) error {
 	if err := d.reg.resolve(); err != nil {
 		return err
 	}
+	// encrypted-Felder: Provider ist Pflicht; ES-Modelle folgen später
+	// (Event-Payloads/Snapshots — siehe doc/API.md §5.5).
+	for _, m := range d.reg.ordered {
+		for _, f := range m.fields {
+			if !f.encrypted {
+				continue
+			}
+			if d.opts.keys == nil {
+				return fmt.Errorf("orm: %s.%s ist encrypted — orm.Encryption(KeyProvider) bei Open fehlt", m.name, f.name)
+			}
+			if m.kind == kindEventSourced {
+				return fmt.Errorf("orm: %s.%s: encrypted auf EventSourced-Modellen kommt später (v1: CRUD)", m.name, f.name)
+			}
+		}
+	}
 	if err := d.bootstrapSystemTables(ctx); err != nil {
 		return err
 	}
