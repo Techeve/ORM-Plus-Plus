@@ -3,8 +3,10 @@ package orm
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -139,9 +141,148 @@ func (t *TenantRegistry) Archive(ctx context.Context, id ID) error {
 	return nil
 }
 
-// Export schreibt den vollständigen Datenauszug eines Tenants (Phase 5).
+// Export schreibt den vollständigen Datenauszug eines Tenants als JSON
+// Lines: eine Kopfzeile, dann je Zeile ein Datensatz — alle tenant-
+// gebundenen Modelle, bei ES-Modellen zusätzlich Events (als CloudEvents,
+// inkl. Archiv) und Snapshots. Verschlüsselte Felder werden entschlüsselt
+// (DSGVO-Auskunft). Auch archivierte Tenants sind exportierbar.
 func (t *TenantRegistry) Export(ctx context.Context, id ID, w io.Writer) error {
-	return fmt.Errorf("orm: Tenants().Export ist noch nicht implementiert (siehe doc/TASK.md)")
+	d := t.d
+	if !d.migrated {
+		return fmt.Errorf("orm: Migrate muss vor Export laufen")
+	}
+	info, err := t.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(w)
+	if err := enc.Encode(map[string]any{"type": "tenant", "data": info}); err != nil {
+		return err
+	}
+	for _, m := range d.reg.ordered {
+		if !m.tenanted() {
+			continue
+		}
+		if err := d.exportRows(ctx, enc, m, id); err != nil {
+			return err
+		}
+		if m.kind == kindEventSourced {
+			if err := d.exportEvents(ctx, enc, m, id); err != nil {
+				return err
+			}
+			if err := d.exportSnapshots(ctx, enc, m, id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// exportRows schreibt die Zeilen eines Models (CRUD oder ES-Read-Model).
+func (d *DB) exportRows(ctx context.Context, enc *json.Encoder, m *model, tenant ID) error {
+	query := fmt.Sprintf("SELECT %s FROM %q WHERE tenant_id = ? ORDER BY %q",
+		selectList(m), m.table, m.pkColumn())
+	rows, err := d.q().QueryContext(ctx, query, tenant.String())
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	n := len(m.fields)
+	es := m.kind == kindEventSourced
+	if es {
+		n += 2 // id, aggregate_seq (selectList)
+	}
+	for rows.Next() {
+		raws := make([]any, n)
+		ptrs := make([]any, n)
+		for i := range raws {
+			ptrs[i] = &raws[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return err
+		}
+		inst := reflect.New(m.goType)
+		for i, f := range m.fields {
+			if err := decodeField(d, f, inst.Elem().FieldByIndex(f.index), raws[i]); err != nil {
+				return err
+			}
+		}
+		rec := map[string]any{"type": "row", "model": m.name, "data": inst.Interface()}
+		if es {
+			var aggID ID
+			if err := aggID.Scan(raws[len(m.fields)]); err != nil {
+				return err
+			}
+			seq, _ := rawInt(raws[len(m.fields)+1])
+			rec["id"] = aggID.String()
+			rec["aggregate_seq"] = seq
+		}
+		if err := enc.Encode(rec); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// exportEvents schreibt den Event-Strom (Hot + Archiv) als CloudEvents-JSON.
+func (d *DB) exportEvents(ctx context.Context, enc *json.Encoder, m *model, tenant ID) error {
+	query := fmt.Sprintf(`SELECT %s FROM %s WHERE tenant_id = ? ORDER BY aggregate_id, aggregate_seq`,
+		esEventSelect(m), esEventsFrom(m, true))
+	rows, err := d.q().QueryContext(ctx, query, tenant.String())
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		r, err := scanEventRow(m, rows)
+		if err != nil {
+			return err
+		}
+		ce := d.cloudEvent(m, r)
+		var data any = ce.Data
+		if json.Valid(ce.Data) {
+			data = json.RawMessage(ce.Data)
+		}
+		// CloudEvents-1.0-JSON-Format (Attribute kleingeschrieben).
+		if err := enc.Encode(map[string]any{"type": "event", "model": m.name, "data": map[string]any{
+			"specversion": ce.SpecVersion, "id": ce.ID, "source": ce.Source, "type": ce.Type,
+			"subject": ce.Subject, "time": ce.Time, "datacontenttype": ce.DataContentType,
+			"data": data, "tenant": ce.Tenant.String(), "geo": ce.Geo,
+			"sequence": ce.Sequence, "aggregateseq": ce.AggregateSeq,
+		}}); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// exportSnapshots schreibt die Snapshots eines ES-Models.
+func (d *DB) exportSnapshots(ctx context.Context, enc *json.Encoder, m *model, tenant ID) error {
+	query := fmt.Sprintf(`SELECT aggregate_id, aggregate_seq, taken_at, state FROM %q
+		WHERE tenant_id = ? ORDER BY aggregate_id, aggregate_seq`, esSnapsTable(m))
+	rows, err := d.q().QueryContext(ctx, query, tenant.String())
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var aggID, taken string
+		var seq int64
+		var state []byte
+		if err := rows.Scan(&aggID, &seq, &taken, &state); err != nil {
+			return err
+		}
+		var st any = state
+		if json.Valid(state) {
+			st = json.RawMessage(state)
+		}
+		if err := enc.Encode(map[string]any{"type": "snapshot", "model": m.name, "data": map[string]any{
+			"aggregate_id": aggID, "aggregate_seq": seq, "taken_at": taken, "state": st,
+		}}); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 // Purge löscht alle Daten eines archivierten Tenants physisch (Phase 5).

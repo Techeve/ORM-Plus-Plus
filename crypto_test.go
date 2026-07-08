@@ -3,6 +3,8 @@ package orm
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -178,5 +180,84 @@ func TestEncryptedOnEventSourcedRejected(t *testing.T) {
 	err = db.Migrate(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "encrypted") {
 		t.Fatalf("encrypted auf ES-Model: %v, erwartet encrypted-Fehler", err)
+	}
+}
+
+func TestTenantExport(t *testing.T) {
+	store := newTestStore(t)
+	db, err := Open(store(), Encryption(StaticKey(testKey(1))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	Register[Vault](db, CRUD())
+	Register[Ticket](db, EventSourced(), ticketEvents(), SnapshotEvery(2))
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	bg := context.Background()
+	tenA, _ := db.Tenants().Create(bg, TenantInfo{Name: "A"})
+	tenB, _ := db.Tenants().Create(bg, TenantInfo{Name: "B"})
+	ctxA := WithTenant(bg, tenA.ID)
+	ctxB := WithTenant(bg, tenB.ID)
+
+	if err := Repo[Vault](db).Insert(ctxA, &Vault{Name: "va", APIKey: "klartext-geheim"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Repo[Vault](db).Insert(ctxB, &Vault{Name: "vb", APIKey: "fremdes-geheimnis"}); err != nil {
+		t.Fatal(err)
+	}
+	tk := New[Ticket](db)
+	if _, err := tk.Append(ctxA, TicketOpened{Title: "Export"}, NoteAdded{Note: "n1"}, NoteAdded{Note: "n2"}); err != nil {
+		t.Fatal(err)
+	}
+	m := db.reg.byName["Ticket"]
+	if err := db.processProjection(bg, m); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.maybeSnapshot(bg, m); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := db.Tenants().Export(bg, tenA.ID, &buf); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	out := buf.String()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+
+	types := map[string]int{}
+	for _, l := range lines {
+		var rec struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(l), &rec); err != nil {
+			t.Fatalf("keine gültige JSON-Line: %q (%v)", l, err)
+		}
+		types[rec.Type]++
+	}
+	if types["tenant"] != 1 || types["row"] != 2 || types["event"] != 3 || types["snapshot"] != 1 {
+		t.Fatalf("Export-Inhalt: %v, erwartet tenant=1 row=2 event=3 snapshot=1", types)
+	}
+	// Entschlüsselt (DSGVO-Auskunft) …
+	if !strings.Contains(out, "klartext-geheim") {
+		t.Fatal("encrypted-Feld muss im Export entschlüsselt sein")
+	}
+	// … und strikt tenant-getrennt.
+	if strings.Contains(out, "fremdes-geheimnis") || strings.Contains(out, "vb") {
+		t.Fatal("Export enthält Daten eines fremden Tenants")
+	}
+
+	// Unbekannter Tenant.
+	if err := db.Tenants().Export(bg, NewID(), &buf); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Export unbekannter Tenant: %v, erwartet ErrNotFound", err)
+	}
+	// Archivierte Tenants bleiben exportierbar.
+	if err := db.Tenants().Archive(bg, tenA.ID); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	if err := db.Tenants().Export(bg, tenA.ID, &buf); err != nil {
+		t.Fatalf("Export archiviert: %v", err)
 	}
 }
