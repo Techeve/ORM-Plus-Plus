@@ -44,6 +44,28 @@ Gemessene Wirkung (Runner, scale=300):
 | ES Load (PostgreSQL) | 255 µs | 214 µs (−16 %) | — |
 
 Der verbleibende Append-Abstand auf SQLite (~+74 % vs. roh) ist echte Engine-Arbeit (Apply, Validierung, Payload-Marshal, Worker-Wake) bei einem Pfad, den auf Server-Backends ohnehin der Roundtrip dominiert. Keine Regressionen (Suite grün auf allen drei Backends). Methodik-Notiz: lokale Messungen auf der Entwicklermaschine waren zu verrauscht (±25–80 %) — belastbare Deltas kommen vom manuellen CI-Bench-Job.
+
+## Performance-Runde 2 ✅ (Beleg: CI-Bench Job 520 → 582)
+
+Vier weitere Commits nach v1.0.0:
+
+1. **Kompilierte Kodierungsarten (`decKind`)**: encode/decode entscheiden pro Feld über ein beim Registrieren gesetztes Enum statt pro Zeile per Interface-Boxing; Scan-Puffer werden pro Abfrage statt pro Zeile alloziert; Get/Update/Delete laufen über den schlanken `tenantScope` ohne unnötige Geo-Auflösung.
+2. **SQLite-Lese-Pool** (die seit Phase 1 notierte Optimierung): WAL erlaubt viele Leser neben dem einen Schreiber; alle Reads außerhalb von Transaktionen (Worker-Scans, Load/History/Stream, WaitFor-Polling, Observability, Export) laufen über einen eigenen query_only-Pool.
+3. **Lease-Memoization**: Der Halter erneuert Aufgaben-Leases erst nach TTL/2 statt pro Worker-Durchlauf — eine Erneuerung ist eine Schreib-Tx (fsync) und konkurrierte sonst mit Appends.
+4. **Wake-Debounce (15 ms)**: Der Worker koalesziert Append-Bursts, damit EINE Projektions-Transaktion viele Events abdeckt statt ein fsync zwischen je zwei Appends.
+
+Overhead vs. Roh-SQL (innerhalb desselben Laufs gemessen — die robuste Metrik; Runner-Grundlast driftet zwischen Läufen):
+
+| Messreihe | v1.0.0 | jetzt |
+|---|---|---|
+| Insert einzeln (SQLite / PG) | +7,6 % / +11,2 % | **+3,3 % / +3,5 %** |
+| Query mit Index (SQLite) | +9,0 % | **−2,0 %** |
+| Update / UpdateSet (PG) | +0,9 % / +4,3 % | +2,6 % / **+2,5 %** |
+| ES Append (PG / YB) | +3,9 % / −1,1 % | +4,3 % / −7,8 % |
+| ES Append (SQLite) | +74 % | **+48 %** |
+| Get per ID (SQLite) | +43 % | +33 % |
+
+**Ehrliche Grenze:** Die verbleibenden Abstände sind kein toter Overhead. Get-per-ID auf SQLite (+33 %) ist Dekodier-Arbeit, die die Roh-Baseline schlicht nicht leistet (JSON-Unmarshal, RFC3339-Parsing, UUID-Parsing ins Struct) — die App müsste sie sonst selbst tun. Der Append-Rest auf SQLite ist Apply-Faltung, Validierung, Payload-Marshal plus bewusste Nebenläufigkeit (der Worker projiziert parallel — auf Server-Backends kostenlos, auf SQLites einem Schreiber prinzipbedingt sichtbar). Einzelwerte einzelner Läufe (n=1) streuen ±15 %; YugabyteDB-Overheads streuen konsensbedingt am stärksten und liegen im Mittel bei ±10 %.
 - ~~Beispielprojekt~~ ✅ `examples/demo` (Mini-DNS-Muster, zwei App-Generationen, jede Fähigkeit einmal, durchkommentiert; `go run ./examples/demo`).
 - Release: Git-Tag `v1.0.0` → CI erzeugt Changelog + GitLab-Release.
 
