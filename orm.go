@@ -10,4 +10,4 @@ package orm
 // Version ist die aktuelle Modulversion. Sie wird bei Releases über
 // Git-Tags (v*) gepflegt; der Changelog wird mit git-cliff aus den
 // Conventional Commits generiert.
-const Version = "0.1.0-dev"
+const Version = "1.0.0"

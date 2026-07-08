@@ -15,7 +15,11 @@ Die konsumierende Anwendung deklariert Modelle (Go-Structs mit Tags) und arbeite
 
 ## Status
 
-Funktional vollständig (Phasen 1–5): CRUD, Event Sourcing (CloudEvents, Snapshots, Archivierung), Expand/Contract-Migrationen mit Dual-Write, Multi-Tenancy (inkl. DSGVO-Export/-Purge), Feld-Verschlüsselung, Geo-Partitionierung und Observability — verhaltensgleich auf allen drei Backends. Vor dem v1.0-Release: Lizenz, Lasttests, Beispielprojekt ([doc/TASK.md](doc/TASK.md)).
+**v1.0.0** — funktional vollständig: CRUD, Event Sourcing (CloudEvents, Snapshots, Archivierung), Expand/Contract-Migrationen mit Dual-Write, Multi-Tenancy (inkl. DSGVO-Export/-Purge), Feld-Verschlüsselung, Geo-Partitionierung und Observability — verhaltensgleich auf allen drei Backends (identische Testsuite in CI).
+
+## Lizenz
+
+[Apache License 2.0](LICENSE) — © Techeve (siehe [NOTICE](NOTICE)). Freie Nutzung inklusive kommerziell; Copyright-Vermerk und NOTICE müssen erhalten bleiben; keine Gewährleistung oder Haftung.
 
 ## Entwicklung
 

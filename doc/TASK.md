@@ -25,7 +25,7 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 
 ## Vor dem Release (v1.0-Tag)
 
-- Lizenzentscheidung (permissiv angedacht) — Entscheidung des Betreibers.
+- ~~Lizenzentscheidung~~ ✅ **Apache 2.0**, © Techeve (LICENSE + NOTICE im Repo-Root) — Patentklausel und NOTICE-Attribution passend für eine kommerziell einbettbare Infrastruktur-Library.
 - ~~Lasttests~~ ✅ Benchmark-Harness `examples/bench`: Append-Durchsatz, Projektions-Aufholzeit und alle CRUD-Pfade gegen alle drei Backends, Bericht als JSON + Go-Benchmark-Format (benchstat) — inkl. **Roh-SQL-Baseline** (identische Statements direkt über den Treiber), die den ORM-Overhead pro Messreihe ausweist. Offen bleibt Fehlerinjektion (Worker-Ausfall mitten in Migration/Projektion) und ein Lauf gegen einen echten YB-Cluster (Docker-Single-Node misst Konsens-Overhead ohne Skalierungsvorteil).
 
 ## Performance-Reserven — umgesetzt ✅ (Beleg: CI-Bench Job 492 → 520, konstante Runner-Hardware)

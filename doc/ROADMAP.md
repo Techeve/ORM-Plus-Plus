@@ -17,7 +17,7 @@ Stand: 2026-07-07. Basiert auf dem Hand-off-Brief plus Interview-Entscheidungen.
 | Multi-Tenancy & Geo | Elementar ab v1 im Datenmodell: Tenant-UUID in jedem Datensatz jeder Tabelle; zusätzlich Geo-Felder mit **mehreren Ebenen von Geolokalität** im Design — v1 implementiert zunächst nur eine Ebene, das Schema ist aber für mehrere ausgelegt |
 | Backend-Reihenfolge | SQLite zuerst (schnelle Tests, einfache CI-Pipelines); PostgreSQL und YugabyteDB werden aber **noch vor v1.0** integriert |
 | Tooling | v1 nur Library-API (auch Migration-Finalisierung ist Go-API); CLI später |
-| Repo | gitlab.techeve.de, Gruppe `orm-plus-plus`, Projekt `orm-plus-plus`; zunächst intern, später Open Source (Lizenz noch offen, permissiv angedacht) |
+| Repo | gitlab.techeve.de, Gruppe `orm-plus-plus`, Projekt `orm-plus-plus`; Open Source unter **Apache 2.0** (© Techeve, entschieden zum v1.0.0-Release) |
 
 ### API-Verfeinerungen (Interview-Runde 2)
 
