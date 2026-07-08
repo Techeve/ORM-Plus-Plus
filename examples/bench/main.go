@@ -40,7 +40,8 @@ import (
 
 	orm "gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // Admin-Verbindung für Schema-Isolation
+	_ "github.com/jackc/pgx/v5/stdlib" // Roh-SQL + Admin-Verbindung (PG/YB)
+	_ "modernc.org/sqlite"             // Roh-SQL (SQLite)
 )
 
 // ============================================================================
@@ -100,6 +101,16 @@ type Bericht struct {
 	GoVersion  string           `json:"go_version"`
 	Plattform  string           `json:"platform"`
 	Backends   []BackendBericht `json:"backends"`
+	Overhead   []OverheadZeile  `json:"overhead,omitempty"`
+}
+
+// OverheadZeile: ORM++ gegen die handgeschriebene Roh-SQL-Baseline.
+type OverheadZeile struct {
+	Backend         string  `json:"backend"`
+	Messreihe       string  `json:"series"`
+	OrmOpsProSek    float64 `json:"orm_ops_per_sec"`
+	RohOpsProSek    float64 `json:"raw_ops_per_sec"`
+	OverheadProzent float64 `json:"overhead_percent"`
 }
 
 // messe führt fn ops-mal aus und sammelt die Einzel-Latenzen.
@@ -314,6 +325,237 @@ func szenario(backend string, treiber orm.Driver, scale int) (BackendBericht, er
 }
 
 // ============================================================================
+// Roh-SQL-Baseline: dieselben Statements, die ORM++ erzeugt — aber
+// handgeschrieben, direkt über database/sql + Treiber. Das ist der
+// IDEALFALL ohne jede Abstraktion (kein Reflection, kein Query-Bau, keine
+// Validierung, vorserialisierte Werte). Die Differenz zur ORM-Messung IST
+// der Preis der Abstraktion.
+// ============================================================================
+
+// rohZiel bündelt eine direkte Treiber-Verbindung samt Dialekt-Kleinkram.
+type rohZiel struct {
+	db      *sql.DB
+	rebind  func(string) string // ? → $n auf PG/YB
+	forUpd  string              // " FOR UPDATE" auf PG/YB
+	cleanup func()
+}
+
+// rohSzenario misst die 8 direkt vergleichbaren Reihen unter demselben
+// Namen wie das ORM-Szenario — so lässt sich der Overhead paaren.
+func rohSzenario(z rohZiel, scale int) (BackendBericht, error) {
+	b := BackendBericht{}
+	ctx := context.Background()
+	q := func(s string) string { return z.rebind(s) }
+	tenant := orm.SingleTenant.String()
+
+	// Schema: exakt die Spalten, die ORM++ für BenchKonto anlegt (BIGINT
+	// hat auf SQLite INTEGER-Affinität — eine DDL für alle Backends).
+	ddl := []string{
+		`CREATE TABLE bench_konto (
+			id TEXT PRIMARY KEY, name TEXT NOT NULL, mail TEXT NOT NULL,
+			stand BIGINT NOT NULL, labels TEXT NOT NULL, version BIGINT NOT NULL,
+			angelegt TEXT NOT NULL, tenant_id TEXT NOT NULL,
+			geo TEXT NOT NULL DEFAULT 'local')`,
+		`CREATE INDEX ix_bk_name ON bench_konto (name)`,
+		`CREATE UNIQUE INDEX ux_bk_mail ON bench_konto (tenant_id, mail)`,
+		`CREATE TABLE bench_zaehler_events (
+			aggregate_id TEXT NOT NULL, aggregate_seq BIGINT NOT NULL,
+			tenant_id TEXT NOT NULL, geo TEXT NOT NULL, seq BIGINT NOT NULL,
+			event_id TEXT NOT NULL, occurred_at TEXT NOT NULL,
+			type_id BIGINT NOT NULL, data TEXT NOT NULL,
+			PRIMARY KEY (aggregate_id, aggregate_seq))`,
+		`CREATE UNIQUE INDEX ux_bze_geo_seq ON bench_zaehler_events (geo, seq)`,
+	}
+	for _, s := range ddl {
+		if _, err := z.db.ExecContext(ctx, s); err != nil {
+			return b, err
+		}
+	}
+
+	rnd := rand.New(rand.NewSource(1))
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	labels := `["a","b"]`
+	ins := q(`INSERT INTO bench_konto (id, name, mail, stand, labels, version, angelegt, tenant_id, geo)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'local')`)
+
+	// Warmup wie im ORM-Lauf.
+	for i := 0; i < 20; i++ {
+		if _, err := z.db.ExecContext(ctx, ins, orm.NewID().String(), "warmup",
+			fmt.Sprintf("w%d@roh", i), 0, labels, 0, now, tenant); err != nil {
+			return b, err
+		}
+	}
+
+	add := func(e Ergebnis, err error) error {
+		if err != nil {
+			return err
+		}
+		b.Ergebnisse = append(b.Ergebnisse, e)
+		return nil
+	}
+
+	// --- 1. Insert einzeln ---
+	ids := make([]string, scale)
+	if err := add(messe("crud/insert_einzeln", scale, func(i int) error {
+		ids[i] = orm.NewID().String()
+		_, err := z.db.ExecContext(ctx, ins, ids[i], fmt.Sprintf("Konto %04d", i),
+			fmt.Sprintf("k%d@roh", i), 0, labels, 0, now, tenant)
+		return err
+	})); err != nil {
+		return b, err
+	}
+
+	// --- 2. InsertMany: Tx + Prepared Statement in 250er-Chunks ---
+	start := time.Now()
+	rows := scale * 4
+	for s := 0; s < rows; s += 250 {
+		tx, err := z.db.BeginTx(ctx, nil)
+		if err != nil {
+			return b, err
+		}
+		st, err := tx.PrepareContext(ctx, ins)
+		if err != nil {
+			return b, err
+		}
+		for i := s; i < min(s+250, rows); i++ {
+			if _, err := st.ExecContext(ctx, orm.NewID().String(), "Bulk",
+				fmt.Sprintf("b%d@roh", i), 0, labels, 0, now, tenant); err != nil {
+				return b, err
+			}
+		}
+		if err := st.Close(); err != nil {
+			return b, err
+		}
+		if err := tx.Commit(); err != nil {
+			return b, err
+		}
+	}
+	b.Ergebnisse = append(b.Ergebnisse, auswerten("crud/insert_many_chunked", rows, time.Since(start), nil))
+
+	// --- 3. Get per ID ---
+	sel := q(`SELECT id, name, mail, stand, labels, version, angelegt FROM bench_konto WHERE id = ? AND tenant_id = ?`)
+	type konto struct {
+		id, name, mail, labels, angelegt string
+		stand, version                   int64
+	}
+	leseEins := func(id string) (konto, error) {
+		var k konto
+		err := z.db.QueryRowContext(ctx, sel, id, tenant).
+			Scan(&k.id, &k.name, &k.mail, &k.stand, &k.labels, &k.version, &k.angelegt)
+		return k, err
+	}
+	if err := add(messe("crud/get_per_id", scale, func(i int) error {
+		_, err := leseEins(ids[rnd.Intn(len(ids))])
+		return err
+	})); err != nil {
+		return b, err
+	}
+
+	// --- 4. Query mit Index ---
+	selIdx := q(`SELECT id, name, mail, stand, labels, version, angelegt FROM bench_konto
+		WHERE name LIKE ? AND tenant_id = ? ORDER BY name LIMIT 20`)
+	if err := add(messe("crud/query_index_limit20", scale/2, func(i int) error {
+		rs, err := z.db.QueryContext(ctx, selIdx, "Konto 00%", tenant)
+		if err != nil {
+			return err
+		}
+		defer rs.Close()
+		var k konto
+		for rs.Next() {
+			if err := rs.Scan(&k.id, &k.name, &k.mail, &k.stand, &k.labels, &k.version, &k.angelegt); err != nil {
+				return err
+			}
+		}
+		return rs.Err()
+	})); err != nil {
+		return b, err
+	}
+
+	// --- 5. Update optimistisch (Get + UPDATE … AND version = ?) ---
+	upd := q(`UPDATE bench_konto SET name = ?, mail = ?, stand = ?, labels = ?, version = ?, angelegt = ?
+		WHERE id = ? AND tenant_id = ? AND version = ?`)
+	if err := add(messe("crud/update_optimistisch", scale/2, func(i int) error {
+		k, err := leseEins(ids[i%len(ids)])
+		if err != nil {
+			return err
+		}
+		_, err = z.db.ExecContext(ctx, upd, k.name, k.mail, k.stand+1, k.labels, k.version+1, k.angelegt,
+			k.id, tenant, k.version)
+		return err
+	})); err != nil {
+		return b, err
+	}
+
+	// --- 6. Mengenbasiertes UpdateSet ---
+	start = time.Now()
+	res, err := z.db.ExecContext(ctx, q(`UPDATE bench_konto SET stand = ? WHERE tenant_id = ? AND name = ?`),
+		int64(1), tenant, "Bulk")
+	if err != nil {
+		return b, err
+	}
+	n, _ := res.RowsAffected()
+	b.Ergebnisse = append(b.Ergebnisse, auswerten("crud/updateset_mengen", int(n), time.Since(start), nil))
+
+	// --- 7. Tx mit Zeilensperre ---
+	selUpd := q(`SELECT stand, version FROM bench_konto WHERE id = ? AND tenant_id = ?`) + z.forUpd
+	if err := add(messe("crud/tx_getforupdate", scale/4, func(i int) error {
+		tx, err := z.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		var stand, version int64
+		if err := tx.QueryRowContext(ctx, selUpd, ids[i%len(ids)], tenant).Scan(&stand, &version); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, q(`UPDATE bench_konto SET stand = ?, version = ? WHERE id = ? AND tenant_id = ?`),
+			stand+1, version+1, ids[i%len(ids)], tenant); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})); err != nil {
+		return b, err
+	}
+
+	// --- 8. ES-Append-Gegenstück: dieselben 3 Statements in einer Tx,
+	// die die Engine fährt (Spitze lesen, Geo-Sequenz holen, Event einfügen).
+	aggs := make([]string, max(1, scale/10))
+	for i := range aggs {
+		aggs[i] = orm.NewID().String()
+	}
+	top := q(`SELECT aggregate_seq, geo FROM bench_zaehler_events WHERE aggregate_id = ? ORDER BY aggregate_seq DESC LIMIT 1`)
+	geoSeq := q(`SELECT COALESCE(MAX(seq), 0) FROM bench_zaehler_events WHERE geo = ?`)
+	insEv := q(`INSERT INTO bench_zaehler_events (aggregate_id, aggregate_seq, tenant_id, geo, seq, event_id, occurred_at, type_id, data)
+		VALUES (?, ?, ?, 'local', ?, ?, ?, 1, ?)`)
+	if err := add(messe("es/append_1_event", scale, func(i int) error {
+		tx, err := z.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		agg := aggs[i%len(aggs)]
+		var cur int64
+		var geo string
+		if err := tx.QueryRowContext(ctx, top, agg).Scan(&cur, &geo); err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		var s int64
+		if err := tx.QueryRowContext(ctx, geoSeq, "local").Scan(&s); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, insEv, agg, cur+1, tenant, s+1,
+			orm.NewID().String(), now, `{"Um":1}`); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})); err != nil {
+		return b, err
+	}
+
+	return b, nil
+}
+
+// ============================================================================
 // Backend-Anbindung & Berichte
 // ============================================================================
 
@@ -321,6 +563,7 @@ func main() {
 	scale := flag.Int("scale", 300, "Skalierungsfaktor (Operationen pro Messreihe)")
 	pgDSN := flag.String("postgres", os.Getenv("ORMPP_BENCH_POSTGRES"), "PostgreSQL-DSN (leer = überspringen)")
 	ybDSN := flag.String("yugabyte", os.Getenv("ORMPP_BENCH_YUGABYTE"), "YugabyteDB-DSN (leer = überspringen)")
+	roh := flag.Bool("roh", true, "Roh-SQL-Baseline mitmessen (ORM-Overhead ausweisen)")
 	jsonOut := flag.String("out", "report.json", "Pfad für den JSON-Bericht")
 	benchOut := flag.String("bench", "bench.txt", "Pfad für das Go-Benchmark-Format (benchstat)")
 	flag.Parse()
@@ -337,6 +580,9 @@ func main() {
 	must(err)
 	defer func() { _ = os.RemoveAll(dir) }()
 	lauf(&bericht, "sqlite", orm.SQLite(filepath.Join(dir, "bench.db")), *scale)
+	if *roh {
+		laufRoh(&bericht, "sqlite", rohSQLite(filepath.Join(dir, "roh.db")), *scale)
+	}
 
 	// PostgreSQL/YugabyteDB: mit frischem Schema pro Lauf (saubere Messung,
 	// keine Altdaten) — dieselbe Isolation wie in der Testsuite.
@@ -344,14 +590,22 @@ func main() {
 		treiber, cleanup := isoliertesSchema(*pgDSN, false)
 		lauf(&bericht, "postgres", treiber, *scale)
 		cleanup()
+		if *roh {
+			laufRoh(&bericht, "postgres", rohPG(*pgDSN), *scale)
+		}
 	}
 	if *ybDSN != "" {
 		treiber, cleanup := isoliertesSchema(*ybDSN, true)
 		lauf(&bericht, "yugabyte", treiber, *scale)
 		cleanup()
+		if *roh {
+			laufRoh(&bericht, "yugabyte", rohPG(*ybDSN), *scale)
+		}
 	}
 
 	druckeVergleich(bericht)
+	berechneOverhead(&bericht)
+	druckeOverhead(bericht)
 
 	// JSON-Bericht (strukturiert, archivierbar).
 	j, err := json.MarshalIndent(bericht, "", "  ")
@@ -382,6 +636,129 @@ func lauf(bericht *Bericht, name string, treiber orm.Driver, scale int) {
 	drucke(b)
 	fmt.Printf("Gesamtlaufzeit %s: %s\n", name, time.Since(start).Round(time.Millisecond))
 	bericht.Backends = append(bericht.Backends, b)
+}
+
+func laufRoh(bericht *Bericht, name string, ziel rohZiel, scale int) {
+	fmt.Printf("\n════ %s/roh — handgeschriebenes SQL, nur der Treiber (scale=%d) ════\n", name, scale)
+	start := time.Now()
+	b, err := rohSzenario(ziel, scale)
+	ziel.cleanup()
+	if err != nil {
+		fmt.Printf("✗ %s/roh übersprungen: %v\n", name, err)
+		return
+	}
+	b.Backend = name + "/roh"
+	drucke(b)
+	fmt.Printf("Gesamtlaufzeit %s: %s\n", b.Backend, time.Since(start).Round(time.Millisecond))
+	bericht.Backends = append(bericht.Backends, b)
+}
+
+// rohSQLite: dieselbe Verbindungskonfiguration wie der ORM-Treiber
+// (WAL, FK, busy_timeout, txlock=immediate, eine Schreib-Connection).
+func rohSQLite(pfad string) rohZiel {
+	dsn := fmt.Sprintf(
+		"file:%s?_txlock=immediate&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", pfad)
+	db, err := sql.Open("sqlite", dsn)
+	must(err)
+	db.SetMaxOpenConns(1)
+	return rohZiel{
+		db:      db,
+		rebind:  func(s string) string { return s },
+		forUpd:  "",
+		cleanup: func() { _ = db.Close() },
+	}
+}
+
+// rohPG: frisches Schema, gleiche Pool-Einstellungen wie der ORM-Treiber.
+func rohPG(dsn string) rohZiel {
+	schema := fmt.Sprintf("roh_%d", time.Now().UnixNano())
+	admin, err := sql.Open("pgx", dsn)
+	must(err)
+	_, err = admin.Exec(fmt.Sprintf("CREATE SCHEMA %q", schema))
+	must(err)
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	db, err := sql.Open("pgx", dsn+sep+"search_path="+schema)
+	must(err)
+	db.SetMaxOpenConns(10)
+	return rohZiel{
+		db:     db,
+		rebind: rebindDollar,
+		forUpd: " FOR UPDATE",
+		cleanup: func() {
+			_ = db.Close()
+			_, _ = admin.Exec(fmt.Sprintf("DROP SCHEMA %q CASCADE", schema))
+			_ = admin.Close()
+		},
+	}
+}
+
+// rebindDollar: ?-Platzhalter → $1, $2, … (String-Literale bleiben stehen).
+func rebindDollar(query string) string {
+	var b strings.Builder
+	n := 0
+	inQuote := false
+	for i := 0; i < len(query); i++ {
+		c := query[i]
+		switch {
+		case c == '\'':
+			inQuote = !inQuote
+			b.WriteByte(c)
+		case c == '?' && !inQuote:
+			n++
+			fmt.Fprintf(&b, "$%d", n)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// berechneOverhead paart ORM- und Roh-Messreihen gleichen Namens.
+func berechneOverhead(bericht *Bericht) {
+	roh := map[string]map[string]float64{} // backend → serie → ops/s
+	for _, be := range bericht.Backends {
+		base, ist := strings.CutSuffix(be.Backend, "/roh")
+		if !ist {
+			continue
+		}
+		m := map[string]float64{}
+		for _, e := range be.Ergebnisse {
+			m[e.Name] = e.OpsProSek
+		}
+		roh[base] = m
+	}
+	for _, be := range bericht.Backends {
+		m, ok := roh[be.Backend]
+		if !ok {
+			continue
+		}
+		for _, e := range be.Ergebnisse {
+			r, ok := m[e.Name]
+			if !ok || r == 0 {
+				continue
+			}
+			bericht.Overhead = append(bericht.Overhead, OverheadZeile{
+				Backend: be.Backend, Messreihe: e.Name,
+				OrmOpsProSek: e.OpsProSek, RohOpsProSek: r,
+				OverheadProzent: (r/e.OpsProSek - 1) * 100,
+			})
+		}
+	}
+}
+
+func druckeOverhead(bericht Bericht) {
+	if len(bericht.Overhead) == 0 {
+		return
+	}
+	fmt.Printf("\n════ ORM++ vs. Roh-SQL (Preis der Abstraktion) ════\n")
+	fmt.Printf("%-10s %-28s %12s %12s %10s\n", "Backend", "Messreihe", "ORM ops/s", "Roh ops/s", "Overhead")
+	for _, o := range bericht.Overhead {
+		fmt.Printf("%-10s %-28s %12.0f %12.0f %9.1f%%\n",
+			o.Backend, o.Messreihe, o.OrmOpsProSek, o.RohOpsProSek, o.OverheadProzent)
+	}
 }
 
 // isoliertesSchema legt ein frisches PG/YB-Schema an und hängt es als
@@ -427,18 +804,24 @@ func drucke(b BackendBericht) {
 }
 
 func druckeVergleich(bericht Bericht) {
-	if len(bericht.Backends) < 2 {
+	var orms []BackendBericht
+	for _, be := range bericht.Backends {
+		if !strings.HasSuffix(be.Backend, "/roh") {
+			orms = append(orms, be)
+		}
+	}
+	if len(orms) < 2 {
 		return
 	}
 	fmt.Printf("\n════ Vergleich (ops/s) ════\n")
 	fmt.Printf("%-28s", "Messreihe")
-	for _, be := range bericht.Backends {
+	for _, be := range orms {
 		fmt.Printf(" %12s", be.Backend)
 	}
 	fmt.Println()
-	for i, e := range bericht.Backends[0].Ergebnisse {
+	for i, e := range orms[0].Ergebnisse {
 		fmt.Printf("%-28s", e.Name)
-		for _, be := range bericht.Backends {
+		for _, be := range orms {
 			if i < len(be.Ergebnisse) {
 				fmt.Printf(" %12.0f", be.Ergebnisse[i].OpsProSek)
 			} else {

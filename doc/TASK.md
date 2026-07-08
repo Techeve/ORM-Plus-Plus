@@ -26,7 +26,17 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 ## Vor dem Release (v1.0-Tag)
 
 - Lizenzentscheidung (permissiv angedacht) — Entscheidung des Betreibers.
-- ~~Lasttests~~ ✅ Benchmark-Harness `examples/bench`: Append-Durchsatz, Projektions-Aufholzeit und alle CRUD-Pfade gegen alle drei Backends, Bericht als JSON + Go-Benchmark-Format (benchstat). Offen bleibt Fehlerinjektion (Worker-Ausfall mitten in Migration/Projektion) und ein Lauf gegen einen echten YB-Cluster (Docker-Single-Node misst Konsens-Overhead ohne Skalierungsvorteil).
+- ~~Lasttests~~ ✅ Benchmark-Harness `examples/bench`: Append-Durchsatz, Projektions-Aufholzeit und alle CRUD-Pfade gegen alle drei Backends, Bericht als JSON + Go-Benchmark-Format (benchstat) — inkl. **Roh-SQL-Baseline** (identische Statements direkt über den Treiber), die den ORM-Overhead pro Messreihe ausweist. Offen bleibt Fehlerinjektion (Worker-Ausfall mitten in Migration/Projektion) und ein Lauf gegen einen echten YB-Cluster (Docker-Single-Node misst Konsens-Overhead ohne Skalierungsvorteil).
+
+## Performance-Reserven (aus der Roh-SQL-Baseline, Kandidaten für nach v1.0)
+
+Referenzlauf scale=200: Auf PG/YB liegt der ORM-Overhead im Netz-Roundtrip-Rauschen (±10–30 %) — dort dominiert die Datenbank. Auf SQLite (in-process) werden die echten Reserven sichtbar, in dieser Reihenfolge lohnend:
+
+1. **Query-String-Caching pro Model**: `insertSQL`/`selectList`/UPDATE-Gerüste werden heute bei jedem Aufruf per `fmt.Sprintf` neu gebaut (inkl. Rebind-Scan). Einmal pro Model/Dialekt cachen ⇒ betrifft alle Pfade; größter Hebel bei `InsertMany` (~+100 % vs. roh).
+2. **Prepared-Statement-Reuse in `InsertMany`**: innerhalb des Chunk-Tx einmal `Prepare`, dann nur `Exec` (pgx cached automatisch, modernc/sqlite nicht).
+3. **Append-Fastpath**: Log-Spitze und Geo-Sequenz in einem Statement statt zwei; Payload-Marshal-Puffer wiederverwenden (~+120 % vs. roh, wovon ein Teil echte Mehrarbeit ist: Apply, Watch-Publish, Worker-Wake).
+
+Vorgehen: jeweils mit `benchstat` vorher/nachher belegen (`examples/bench -bench alt.txt` / `neu.txt`).
 - ~~Beispielprojekt~~ ✅ `examples/demo` (Mini-DNS-Muster, zwei App-Generationen, jede Fähigkeit einmal, durchkommentiert; `go run ./examples/demo`).
 - Release: Git-Tag `v1.0.0` → CI erzeugt Changelog + GitLab-Release.
 

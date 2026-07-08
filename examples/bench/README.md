@@ -14,8 +14,32 @@ go run ./examples/bench \
     -scale 300
 ```
 
-Flags: `-scale` (Operationen pro Messreihe), `-out report.json`, `-bench bench.txt`.
+Flags: `-scale` (Operationen pro Messreihe), `-out report.json`, `-bench bench.txt`,
+`-roh=false` (Roh-SQL-Baseline abschalten).
 DSNs alternativ über `ORMPP_BENCH_POSTGRES` / `ORMPP_BENCH_YUGABYTE`.
+
+## Roh-SQL-Baseline: der Preis der Abstraktion
+
+Zu jedem Backend läuft zusätzlich ein **`<backend>/roh`-Lauf**: dieselben
+Statements, die ORM++ erzeugt — aber handgeschrieben, direkt über
+`database/sql` + Treiber (gleiche Pragmas, gleiche Pool-Einstellungen,
+frischer Speicher, Prepared Statements, vorserialisierte Werte). Das ist der
+Idealfall ohne jede Abstraktion: kein Reflection, kein Query-Bau, keine
+Validierung. Die Tabelle **„ORM++ vs. Roh-SQL"** weist den Overhead pro
+Messreihe aus (auch in `report.json` unter `overhead`).
+
+Erkenntnisse des Referenzlaufs (lokal, scale=200):
+
+- **Auf PG/YB verschwindet der ORM-Overhead fast vollständig im
+  Netz-/Konsens-Roundtrip** (±10–30 %, teils Messrauschen) — die Datenbank
+  dominiert, nicht die Library.
+- **Auf SQLite (in-process, nichts versteckt den CPU-Anteil)** zeigen sich
+  die echten Reserven: `insert_many_chunked` ~+100 % (Query-String wird pro
+  Zeile neu gebaut, kein Prepared-Statement-Reuse) und `es/append_1_event`
+  ~+120 % (wobei die Engine hier auch echte Mehrarbeit leistet: Apply,
+  Watch-Publish, Worker-Wake).
+- Werte um ±20 % sind Rauschen (getrennte Dateien/Schemata, WAL-Varianz) —
+  für belastbare Deltas mehrere Läufe mit `benchstat` mitteln.
 
 ## Das Szenario
 
