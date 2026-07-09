@@ -8,6 +8,18 @@ Model-first Persistenz-Modul für Go: klassisches ORM-Mapping **plus** Event Sou
 
 Die konsumierende Anwendung deklariert Modelle (Go-Structs mit Tags) und arbeitet mit Commands, Events und typisierten Queries — sie schreibt **kein SQL** und kennt keine DB-Details.
 
+## Dokumentation
+
+Die **vollständige Dokumentation** liegt als Astro-Starlight-Site unter [`docs/`](docs/) —
+zweisprachig (Deutsch/Englisch, Sprachumschalter oben rechts), gegliedert in *Erste Schritte*,
+*Anleitungen*, *Beispiele* und *Referenz*. Lokal ansehen:
+
+```sh
+cd docs && npm install && npm run dev
+```
+
+Die folgenden Quelldokumente bleiben als knappe Referenz erhalten und speisen die Site:
+
 - **[doc/API.md](doc/API.md)** — die vollständige API-Spezifikation (Implementierungsvertrag): Instanziierung, Modelle, Queries, Event Sourcing, Migration, Clusterbetrieb.
 - **[doc/ROADMAP.md](doc/ROADMAP.md)** — Architektur-Entscheidungen, physisches Schema und Phasenplan.
 - **[examples/demo](examples/demo)** — die durchkommentierte Beispielanwendung: `go run ./examples/demo` zeigt jede Fähigkeit einmal (CRUD, Event Sourcing, Tenants, Geo, Verschlüsselung, Migration mit Dual-Write, Upcaster, DSGVO, Observability).

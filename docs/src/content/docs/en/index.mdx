@@ -1,0 +1,48 @@
+---
+title: ORM++
+description: Model-first persistence for Go — classic ORM plus event sourcing, projections, snapshots and expand/contract migrations, behaviourally identical on SQLite, PostgreSQL and YugabyteDB.
+template: splash
+hero:
+  tagline: One application. One codebase. Three databases. No SQL.
+  actions:
+    - text: Get started
+      link: /en/start/introduction/
+      icon: right-arrow
+    - text: View on GitLab
+      link: https://gitlab.techeve.de/orm-plus-plus/orm-plus-plus
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+## What is ORM++?
+
+**ORM++** is a model-first persistence module for Go: the application declares
+models as tagged Go structs and works with commands, events and typed
+queries — it writes **no SQL** and knows no database details.
+
+<CardGrid stagger>
+  <Card title="ORM + Event Sourcing" icon="seti:go">
+    Classic CRUD models **and** event-sourced aggregates with CloudEvents,
+    snapshots and archiving — in one module, in one transaction.
+  </Card>
+  <Card title="Behaviourally identical" icon="approve-check">
+    The same application runs byte-for-byte identically on **SQLite**,
+    **PostgreSQL** and **YugabyteDB**. App code never branches on the backend.
+  </Card>
+  <Card title="Multi-tenancy & geo" icon="puzzle">
+    Tenant and geo scope are baked into the data model from v1 and enforced
+    structurally (fail-closed).
+  </Card>
+  <Card title="Zero-downtime migrations" icon="rocket">
+    Expand/contract with dual-write: old and new app versions run side by side
+    during a migration.
+  </Card>
+</CardGrid>
+
+## Where to next
+
+- [Introduction](/en/start/introduction/) — core principle and overview
+- [Quickstart](/en/start/quickstart/) — running in five minutes
+- [Examples](/en/examples/overview/) — complete applications
