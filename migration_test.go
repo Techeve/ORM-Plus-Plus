@@ -396,7 +396,7 @@ func TestFinalizeGuards(t *testing.T) {
 }
 
 // Regression: eine per ALTER ADD COLUMN nachgerüstete JSON-Spalte muss für
-// Bestandszeilen lesbar sein. Vor dem Fix befüllte das Text-Zero-Literal ''
+// Bestandszeilen lesbar sein. Vor dem Fix befüllte das Text-Zero-Literal ”
 // die Zeilen — json.Unmarshal("") scheiterte mit "unexpected end of JSON
 // input". Jetzt gilt: Zero-Literal ist 'null', und leere Zellen zählen beim
 // Lesen wie NULL (Zero-Value).
