@@ -94,6 +94,8 @@ func (pgDialect) zeroLiteral(k colKind) string {
 		return "0"
 	case kBlob:
 		return `'\x'`
+	case kJSON:
+		return "'null'" // gültiges JSON(B) — '' wäre beim Lesen ein Parse-Fehler
 	default:
 		return "''"
 	}

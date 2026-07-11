@@ -394,3 +394,86 @@ func TestFinalizeGuards(t *testing.T) {
 		t.Fatalf("Finalize(aktuelle Version, idle) muss idempotent OK sein: %v", err)
 	}
 }
+
+// Regression: eine per ALTER ADD COLUMN nachgerüstete JSON-Spalte muss für
+// Bestandszeilen lesbar sein. Vor dem Fix befüllte das Text-Zero-Literal ''
+// die Zeilen — json.Unmarshal("") scheiterte mit "unexpected end of JSON
+// input". Jetzt gilt: Zero-Literal ist 'null', und leere Zellen zählen beim
+// Lesen wie NULL (Zero-Value).
+func TestAlterAddedJSONColumnReadsAsZero(t *testing.T) {
+	store := newTestStore(t)
+	bg := context.Background()
+	ctx := WithTenant(bg, SingleTenant)
+
+	// v1: Modell ohne JSON-Feld, eine Bestandszeile.
+	{
+		type Widget struct {
+			ID   ID     `orm:"pk"`
+			Name string `orm:"required"`
+		}
+		db, err := Open(store())
+		if err != nil {
+			t.Fatal(err)
+		}
+		Register[Widget](db, CRUD())
+		SchemaVersion(db, 1)
+		if err := db.Migrate(bg); err != nil {
+			t.Fatalf("Migrate v1: %v", err)
+		}
+		if err := Repo[Widget](db).Insert(ctx, &Widget{Name: "alt"}); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+	}
+
+	// v2: JSON-Spalte kommt per ALTER dazu — Bestandszeile bleibt lesbar.
+	{
+		type Widget struct {
+			ID   ID       `orm:"pk"`
+			Name string   `orm:"required"`
+			Tags []string `orm:"json"`
+		}
+		db, err := Open(store())
+		if err != nil {
+			t.Fatal(err)
+		}
+		Register[Widget](db, CRUD())
+		SchemaVersion(db, 2)
+		if err := db.Migrate(bg); err != nil {
+			t.Fatalf("Migrate v2: %v", err)
+		}
+		defer db.Close()
+
+		rows, err := Query[Widget](db, ctx).All()
+		if err != nil {
+			t.Fatalf("Bestandszeile mit nachgerüsteter JSON-Spalte lesen: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Name != "alt" || rows[0].Tags != nil {
+			t.Fatalf("rows = %+v", rows)
+		}
+
+		// Heilung von Alt-Beständen: Zellen mit '' (vor dem Fix erzeugt)
+		// lesen sich ebenfalls als Zero-Value statt zu scheitern.
+		if _, err := db.q().ExecContext(ctx, `UPDATE "widget" SET "tags" = ''`); err != nil {
+			t.Fatalf("'' provozieren: %v", err)
+		}
+		rows, err = Query[Widget](db, ctx).All()
+		if err != nil {
+			t.Fatalf("leere JSON-Zelle lesen: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Tags != nil {
+			t.Fatalf("rows nach '' = %+v", rows)
+		}
+
+		// Schreiben und Zurücklesen funktioniert normal weiter.
+		w := rows[0]
+		w.Tags = []string{"a", "b"}
+		if err := Repo[Widget](db).Update(ctx, w); err != nil {
+			t.Fatal(err)
+		}
+		w, err = Query[Widget](db, ctx).First()
+		if err != nil || len(w.Tags) != 2 {
+			t.Fatalf("roundtrip = %+v (%v)", w, err)
+		}
+	}
+}

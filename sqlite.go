@@ -69,6 +69,8 @@ func (sqliteDialect) zeroLiteral(k colKind) string {
 		return "0"
 	case kBlob:
 		return "x''"
+	case kJSON:
+		return "'null'" // gültiges JSON — '' wäre beim Lesen ein Parse-Fehler
 	default:
 		return "''"
 	}

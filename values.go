@@ -132,6 +132,13 @@ func decodeField(d *DB, f *field, target reflect.Value, raw any) error {
 		default:
 			return fmt.Errorf("orm: JSON-Spalte %s: unerwarteter Typ %T", f.column, raw)
 		}
+		// Leere Zellen zählen wie NULL: ALTER ADD COLUMN befüllte
+		// Bestandszeilen vor dem 'null'-Zero-Literal mit '' — das darf
+		// beim Lesen nicht scheitern (Zero-Value statt Parse-Fehler).
+		if len(data) == 0 {
+			target.SetZero()
+			return nil
+		}
 		return json.Unmarshal(data, target.Addr().Interface())
 	}
 
