@@ -17,3 +17,7 @@ coverage.txt
 
 # OS
 .DS_Store
+
+# Benchmark-Berichte (examples/bench)
+report.json
+bench.txt

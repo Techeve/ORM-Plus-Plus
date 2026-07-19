@@ -62,6 +62,11 @@ type field struct {
 	// restrict-Vorprüfung — nie im Hot Path zusammensetzen.
 	refSQL      string
 	restrictSQL string
+
+	// dk: die Kodierungsart, EINMAL beim Registrieren bestimmt — der
+	// Hot Path macht nur noch einen Integer-Switch statt pro Zeile per
+	// Interface-Boxing den Typ zu erraten.
+	dk decKind
 }
 
 // model ist der kompilierte Plan eines registrierten Models.
@@ -409,6 +414,7 @@ func parseField(sf reflect.StructField, tag string) (*field, error) {
 			return nil, fmt.Errorf("encrypted nur auf string- oder []byte-Feldern")
 		}
 	}
+	f.dk = decKindOf(f)
 	return f, nil
 }
 

@@ -182,7 +182,7 @@ func (t *TenantRegistry) Export(ctx context.Context, id ID, w io.Writer) error {
 func (d *DB) exportRows(ctx context.Context, enc *json.Encoder, m *model, tenant ID) error {
 	query := fmt.Sprintf("SELECT %s FROM %q WHERE tenant_id = ? ORDER BY %q",
 		selectList(m), m.table, m.pkColumn())
-	rows, err := d.q().QueryContext(ctx, query, tenant.String())
+	rows, err := d.qr().QueryContext(ctx, query, tenant.String())
 	if err != nil {
 		return err
 	}
@@ -228,7 +228,7 @@ func (d *DB) exportRows(ctx context.Context, enc *json.Encoder, m *model, tenant
 func (d *DB) exportEvents(ctx context.Context, enc *json.Encoder, m *model, tenant ID) error {
 	query := fmt.Sprintf(`SELECT %s FROM %s WHERE tenant_id = ? ORDER BY aggregate_id, aggregate_seq`,
 		esEventSelect(m), esEventsFrom(m, true))
-	rows, err := d.q().QueryContext(ctx, query, tenant.String())
+	rows, err := d.qr().QueryContext(ctx, query, tenant.String())
 	if err != nil {
 		return err
 	}
@@ -260,7 +260,7 @@ func (d *DB) exportEvents(ctx context.Context, enc *json.Encoder, m *model, tena
 func (d *DB) exportSnapshots(ctx context.Context, enc *json.Encoder, m *model, tenant ID) error {
 	query := fmt.Sprintf(`SELECT aggregate_id, aggregate_seq, taken_at, state FROM %q
 		WHERE tenant_id = ? ORDER BY aggregate_id, aggregate_seq`, esSnapsTable(m))
-	rows, err := d.q().QueryContext(ctx, query, tenant.String())
+	rows, err := d.qr().QueryContext(ctx, query, tenant.String())
 	if err != nil {
 		return err
 	}

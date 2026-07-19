@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -392,5 +393,111 @@ func TestFinalizeGuards(t *testing.T) {
 	}
 	if err := db.FinalizeMigration(bg, 1); err != nil {
 		t.Fatalf("Finalize(aktuelle Version, idle) muss idempotent OK sein: %v", err)
+	}
+}
+
+// Regression: eine per ALTER ADD COLUMN nachgerüstete JSON-Spalte muss für
+// Bestandszeilen lesbar sein. Vor dem Fix befüllte das Text-Zero-Literal ”
+// die Zeilen — json.Unmarshal("") scheiterte mit "unexpected end of JSON
+// input". Jetzt ist das Zero-Literal 'null' (gültiges JSON auf allen
+// Backends). Die Heilung von ”-Altbeständen testet
+// TestDecodeJSONHealsLegacyEmptyCell — ”-Zellen kann es nur auf SQLite
+// geben (TEXT-Spalte); JSONB auf PG/YB lehnt ” physisch ab.
+func TestAlterAddedJSONColumnReadsAsZero(t *testing.T) {
+	store := newTestStore(t)
+	bg := context.Background()
+	ctx := WithTenant(bg, SingleTenant)
+
+	// v1: Modell ohne JSON-Feld, eine Bestandszeile.
+	{
+		type Widget struct {
+			ID   ID     `orm:"pk"`
+			Name string `orm:"required"`
+		}
+		db, err := Open(store())
+		if err != nil {
+			t.Fatal(err)
+		}
+		Register[Widget](db, CRUD())
+		SchemaVersion(db, 1)
+		if err := db.Migrate(bg); err != nil {
+			t.Fatalf("Migrate v1: %v", err)
+		}
+		if err := Repo[Widget](db).Insert(ctx, &Widget{Name: "alt"}); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+	}
+
+	// v2: JSON-Spalte kommt per ALTER dazu — Bestandszeile bleibt lesbar.
+	{
+		type Widget struct {
+			ID   ID       `orm:"pk"`
+			Name string   `orm:"required"`
+			Tags []string `orm:"json"`
+		}
+		db, err := Open(store())
+		if err != nil {
+			t.Fatal(err)
+		}
+		Register[Widget](db, CRUD())
+		SchemaVersion(db, 2)
+		if err := db.Migrate(bg); err != nil {
+			t.Fatalf("Migrate v2: %v", err)
+		}
+		defer db.Close()
+
+		rows, err := Query[Widget](db, ctx).All()
+		if err != nil {
+			t.Fatalf("Bestandszeile mit nachgerüsteter JSON-Spalte lesen: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Name != "alt" || rows[0].Tags != nil {
+			t.Fatalf("rows = %+v", rows)
+		}
+
+		// Schreiben und Zurücklesen funktioniert normal weiter.
+		w := rows[0]
+		w.Tags = []string{"a", "b"}
+		if err := Repo[Widget](db).Update(ctx, w); err != nil {
+			t.Fatal(err)
+		}
+		w, err = Query[Widget](db, ctx).First()
+		if err != nil || len(w.Tags) != 2 {
+			t.Fatalf("roundtrip = %+v (%v)", w, err)
+		}
+	}
+}
+
+// Heilung von ”-Altbeständen (vom alten Text-Zero-Literal auf SQLite
+// hinterlassen): leere JSON-Zellen zählen beim Dekodieren wie NULL statt an
+// json.Unmarshal zu scheitern. Bewusst ein Unit-Test der Dekodierung — auf
+// PG/YB kann ” in einer JSONB-Spalte gar nicht existieren, also lässt sich
+// der Zustand dort nicht verhaltensgleich provozieren; der Dekodier-Pfad
+// selbst ist backend-frei und damit überall identisch.
+func TestDecodeJSONHealsLegacyEmptyCell(t *testing.T) {
+	f := &field{column: "tags", dk: dJSON}
+
+	for name, raw := range map[string]any{
+		"leerer String": "",
+		"leeres Blob":   []byte{},
+		"NULL":          nil,
+	} {
+		tags := []string{"vorbelegt"} // beweist, dass wirklich genullt wird
+		target := reflect.ValueOf(&tags).Elem()
+		if err := decodeField(nil, f, target, raw); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if tags != nil {
+			t.Fatalf("%s: tags = %+v, erwartet Zero-Value", name, tags)
+		}
+	}
+
+	// Gültiges JSON dekodiert unverändert weiter.
+	var tags []string
+	if err := decodeField(nil, f, reflect.ValueOf(&tags).Elem(), `["a","b"]`); err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 2 || tags[0] != "a" {
+		t.Fatalf("tags = %+v", tags)
 	}
 }

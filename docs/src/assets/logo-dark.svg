@@ -1,0 +1,20 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ORM++">
+  <title>ORM++</title>
+  <desc>Ein Datenbank-Zylinder aus gestapelten Scheiben mit cyanfarbenem Deckel und einem hochgestellten Doppelplus, für dunkle Hintergründe.</desc>
+  <!-- Zylinderkörper (gestapelte Event-Log-Scheiben) -->
+  <path d="M52 90 L52 182 A60 21 0 0 0 172 182 L172 90 Z" fill="#EAF1F4"/>
+  <!-- Naht zwischen den Scheiben -->
+  <path d="M52 121 A60 21 0 0 0 172 121" fill="none" stroke="#0F2333" stroke-width="3" stroke-opacity="0.28" stroke-linecap="round"/>
+  <path d="M52 151 A60 21 0 0 0 172 151" fill="none" stroke="#0F2333" stroke-width="3" stroke-opacity="0.28" stroke-linecap="round"/>
+  <!-- Deckel -->
+  <ellipse cx="112" cy="90" rx="60" ry="21" fill="#19B6C7"/>
+  <ellipse cx="112" cy="90" rx="35" ry="10.5" fill="none" stroke="#0F2333" stroke-opacity="0.30" stroke-width="2.5"/>
+  <circle cx="112" cy="90" r="3.4" fill="#0F2333" fill-opacity="0.45"/>
+  <!-- ++ als Hochstellung -->
+  <g fill="#2CC3D3">
+    <rect x="171" y="58.5" width="22" height="7" rx="2.5"/>
+    <rect x="178.5" y="51" width="7" height="22" rx="2.5"/>
+    <rect x="197" y="58.5" width="22" height="7" rx="2.5"/>
+    <rect x="204.5" y="51" width="7" height="22" rx="2.5"/>
+  </g>
+</svg>

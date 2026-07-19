@@ -35,25 +35,34 @@ type repo[T any] struct {
 
 // scope löst Tenant und Geo aus dem Context auf (fail-closed).
 func (r *repo[T]) scope(ctx context.Context) (tenant ID, geo string, err error) {
-	d := r.h.db()
-	if r.m == nil {
-		return ID{}, "", fmt.Errorf("orm: Model %T ist nicht registriert", *new(T))
+	tenant, err = r.tenantScope(ctx)
+	if err != nil {
+		return ID{}, "", err
 	}
-	if r.m.kind == kindEventSourced {
-		return ID{}, "", fmt.Errorf("orm: %s ist event-sourced — orm.New/orm.Load/Append statt CRUD-Repository verwenden", r.m.name)
-	}
-	if r.m.tenanted() {
-		t, ok := tenantFrom(ctx)
-		if !ok {
-			return ID{}, "", ErrNoTenant
-		}
-		tenant = t
-	}
-	geo, err = d.dataGeo(ctx)
+	geo, err = r.h.db().dataGeo(ctx)
 	if err != nil {
 		return ID{}, "", err
 	}
 	return tenant, geo, nil
+}
+
+// tenantScope ist der schlanke Scope für Pfade ohne Geo-Bedarf
+// (Get/Update/Delete/Queries — Reads filtern nie auf Geo).
+func (r *repo[T]) tenantScope(ctx context.Context) (ID, error) {
+	if r.m == nil {
+		return ID{}, fmt.Errorf("orm: Model %T ist nicht registriert", *new(T))
+	}
+	if r.m.kind == kindEventSourced {
+		return ID{}, fmt.Errorf("orm: %s ist event-sourced — orm.New/orm.Load/Append statt CRUD-Repository verwenden", r.m.name)
+	}
+	if !r.m.tenanted() {
+		return ID{}, nil
+	}
+	t, ok := tenantFrom(ctx)
+	if !ok {
+		return ID{}, ErrNoTenant
+	}
+	return t, nil
 }
 
 // prepareWrite validiert Constraints und erzeugt die Insert-Werte —
@@ -207,7 +216,7 @@ func (r *repo[T]) InsertMany(ctx context.Context, entities []*T, opts ...BatchOp
 }
 
 func (r *repo[T]) get(ctx context.Context, id ID, lock bool) (*T, error) {
-	tenant, _, err := r.scope(ctx)
+	tenant, err := r.tenantScope(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +254,7 @@ func (r *repo[T]) GetForUpdate(ctx context.Context, id ID) (*T, error) {
 }
 
 func (r *repo[T]) Update(ctx context.Context, e *T) error {
-	tenant, _, err := r.scope(ctx)
+	tenant, err := r.tenantScope(ctx)
 	if err != nil {
 		return err
 	}
@@ -322,7 +331,7 @@ func (r *repo[T]) Upsert(ctx context.Context, e *T) error {
 }
 
 func (r *repo[T]) Delete(ctx context.Context, id ID) error {
-	tenant, _, err := r.scope(ctx)
+	tenant, err := r.tenantScope(ctx)
 	if err != nil {
 		return err
 	}

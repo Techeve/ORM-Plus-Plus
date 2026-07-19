@@ -38,7 +38,7 @@ func (d *DB) MigrationStatus(ctx context.Context) (MigrationStatus, error) {
 		Geo:            map[string]GeoProgress{},
 	}
 	if st.target > 0 {
-		rows, err := d.q().QueryContext(ctx, `
+		rows, err := d.qr().QueryContext(ctx, `
 			SELECT geo, COUNT(*), SUM(CASE WHEN state = 'done' THEN 1 ELSE 0 END)
 			FROM ormpp_migration_progress WHERE version > ? AND version <= ? GROUP BY geo`,
 			st.current, st.target)
@@ -73,7 +73,7 @@ func (d *DB) MigrationStatus(ctx context.Context) (MigrationStatus, error) {
 	}
 	// Lebende Migrations-Worker je Region.
 	cutoff := nowUTC().Add(-instanceTTL).Format(time.RFC3339Nano)
-	rows, err := d.q().QueryContext(ctx, `
+	rows, err := d.qr().QueryContext(ctx, `
 		SELECT geo, COUNT(*) FROM ormpp_instances
 		WHERE migration_role = ? AND last_heartbeat > ? GROUP BY geo`,
 		int(MigrationWorker), cutoff)
@@ -131,7 +131,7 @@ type RegionInfo struct {
 func (d *DB) Health(ctx context.Context) (Health, error) {
 	var h Health
 
-	rows, err := d.q().QueryContext(ctx, `
+	rows, err := d.qr().QueryContext(ctx, `
 		SELECT instance_id, hostname, geo, migration_role, app_version, schema_version, last_heartbeat
 		FROM ormpp_instances ORDER BY started_at`)
 	if err != nil {
@@ -165,7 +165,7 @@ func (d *DB) Health(ctx context.Context) (Health, error) {
 			continue
 		}
 		tops := map[string]int64{}
-		rows, err := d.q().QueryContext(ctx,
+		rows, err := d.qr().QueryContext(ctx,
 			fmt.Sprintf(`SELECT geo, MAX(seq) FROM %q GROUP BY geo`, esEventsTable(m)))
 		if err != nil {
 			return h, err
@@ -202,7 +202,7 @@ func (d *DB) Health(ctx context.Context) (Health, error) {
 		}
 	}
 
-	rrows, err := d.q().QueryContext(ctx,
+	rrows, err := d.qr().QueryContext(ctx,
 		`SELECT name, status, placement FROM ormpp_geo_regions ORDER BY name`)
 	if err != nil {
 		return h, err

@@ -97,6 +97,24 @@ lint:
     - if: $CI_COMMIT_BRANCH
     - if: $CI_COMMIT_TAG
 
+# Dokumentations-Site (Astro Starlight, docs/) bauen — laeuft nur bei
+# Aenderungen unter docs/, damit unabhaengige Commits nicht ausgebremst werden.
+docs:
+  stage: test
+  image: node:22
+  script:
+    - cd docs
+    - npm ci
+    - npm run build
+  artifacts:
+    paths: [docs/dist/]
+    expire_in: 2 weeks
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: [docs/**/*]
+    - if: $CI_COMMIT_BRANCH
+      changes: [docs/**/*]
+
 # Performance-Benchmark auf dem Runner (konstante Hardware) — MANUELL
 # startbar (Play-Button), blockiert die Pipeline nicht. Artefakte:
 # report.json (strukturiert) und bench.txt (Go-Benchmark-Format) —
