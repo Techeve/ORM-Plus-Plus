@@ -14,6 +14,12 @@ export default defineConfig({
     starlight({
       title: "ORM++",
       tagline: "Model-first Persistenz für Go: ORM + Event Sourcing + Migrationen",
+      logo: {
+        light: "./src/assets/logo.svg",
+        dark: "./src/assets/logo-dark.svg",
+        alt: "ORM++",
+      },
+      favicon: "/favicon.svg",
       defaultLocale: "de",
       locales: {
         de: { label: "Deutsch", lang: "de" },
