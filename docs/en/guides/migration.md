@@ -55,3 +55,51 @@ register, all regions finished backfilling.
    `Migrate` moves to `expanding`, then `backfill`, then `dual-write`.
 2. Retire old instances (the register empties).
 3. `FinalizeMigration` — from an ops job or manually.
+
+## Example: batch migration script with its own checkpoint
+
+`BatchScript` itself doesn't prescribe an iteration strategy — the script
+uses the normal query and update APIs and manages its own progress. Here's a
+normalization that resumes exactly where it left off after a restart:
+
+```go
+orm.MigrationTo(db, 4,
+	orm.BatchScript("normalize-email", func(ctx context.Context, b orm.Batch) error {
+		last, err := b.Checkpoint(ctx) // "" on the very first run
+		if err != nil {
+			return err
+		}
+
+		var processed int64
+		for account, err := range orm.Query[ProviderAccount](db, ctx).
+			Where(orm.Gt("ID", last)).
+			OrderBy("ID", orm.Asc).
+			Iter() {
+			if err != nil {
+				return err
+			}
+			normalized := strings.ToLower(strings.TrimSpace(account.Email))
+			if normalized == account.Email {
+				continue
+			}
+			if _, err := orm.Query[ProviderAccount](db, ctx).
+				Where(orm.Eq("ID", account.ID)).
+				UpdateSet(orm.Set("Email", normalized)); err != nil {
+				return err
+			}
+			processed++
+			if processed%500 == 0 { // checkpoint every 500 rows, not every single one
+				if err := b.SaveCheckpoint(ctx, account.ID.String(), processed); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}),
+)
+```
+
+If the process dies mid-run, the next attempt finds the last saved ID via
+`b.Checkpoint(ctx)` and resumes exactly there through the
+`Where(orm.Gt("ID", last))` condition — the script only needs to be
+idempotent to set up, not recompute the whole backfill.

@@ -1,0 +1,44 @@
+<svg width="720" height="410" viewBox="0 0 720 410" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Eine Go-Anwendung spricht mit ORM++, das dieselbe API auf SQLite, PostgreSQL und YugabyteDB abbildet.">
+  <title>Architektur: Eine Anwendung, ein Code, drei Datenbanken</title>
+  <defs>
+    <marker id="pfeil" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#19B6C7"/>
+    </marker>
+  </defs>
+
+  <!-- Go-Anwendung -->
+  <rect x="260" y="16" width="200" height="56" rx="10" fill="#0F2333"/>
+  <text x="360" y="50" text-anchor="middle" font-family="system-ui, sans-serif" font-size="21" font-weight="600" fill="#FFFFFF">Go-Anwendung</text>
+
+  <!-- Pfeil App -> ORM++ -->
+  <line x1="360" y1="74" x2="360" y2="103" stroke="#19B6C7" stroke-width="4" marker-end="url(#pfeil)"/>
+
+  <!-- ORM++ Zylinder (aus dem Projektlogo, skaliert) -->
+  <g transform="translate(298,82) scale(0.55)">
+    <path d="M52 90 L52 182 A60 21 0 0 0 172 182 L172 90 Z" fill="#0F2333"/>
+    <path d="M52 121 A60 21 0 0 0 172 121" fill="none" stroke="#19B6C7" stroke-width="3" stroke-opacity="0.55" stroke-linecap="round"/>
+    <path d="M52 151 A60 21 0 0 0 172 151" fill="none" stroke="#19B6C7" stroke-width="3" stroke-opacity="0.55" stroke-linecap="round"/>
+    <ellipse cx="112" cy="90" rx="60" ry="21" fill="#19B6C7"/>
+    <ellipse cx="112" cy="90" rx="35" ry="10.5" fill="none" stroke="#0F2333" stroke-opacity="0.28" stroke-width="2.5"/>
+    <circle cx="112" cy="90" r="3.4" fill="#0F2333" fill-opacity="0.4"/>
+  </g>
+
+  <!-- ORM++ Beschriftung -->
+  <rect x="308" y="213" width="104" height="34" rx="17" fill="#19B6C7"/>
+  <text x="360" y="236" text-anchor="middle" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0F2333">ORM++</text>
+
+  <!-- Drei Pfeile zu den Backends -->
+  <line x1="360" y1="249" x2="140" y2="316" stroke="#19B6C7" stroke-width="3" marker-end="url(#pfeil)"/>
+  <line x1="360" y1="249" x2="360" y2="316" stroke="#19B6C7" stroke-width="3" marker-end="url(#pfeil)"/>
+  <line x1="360" y1="249" x2="580" y2="316" stroke="#19B6C7" stroke-width="3" marker-end="url(#pfeil)"/>
+
+  <!-- Backends -->
+  <rect x="40" y="322" width="200" height="56" rx="10" fill="#0F2333"/>
+  <text x="140" y="356" text-anchor="middle" font-family="system-ui, sans-serif" font-size="18" font-weight="600" fill="#FFFFFF">SQLite</text>
+
+  <rect x="260" y="322" width="200" height="56" rx="10" fill="#0F2333"/>
+  <text x="360" y="356" text-anchor="middle" font-family="system-ui, sans-serif" font-size="18" font-weight="600" fill="#FFFFFF">PostgreSQL</text>
+
+  <rect x="480" y="322" width="200" height="56" rx="10" fill="#0F2333"/>
+  <text x="580" y="356" text-anchor="middle" font-family="system-ui, sans-serif" font-size="18" font-weight="600" fill="#FFFFFF">YugabyteDB</text>
+</svg>

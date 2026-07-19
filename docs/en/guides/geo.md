@@ -53,3 +53,34 @@ region answers.
 **Geo pinning (ES):** the data geo sticks to the aggregate from its first
 event. `WithGeo` sets the home region at creation; subsequent appends always
 write to the home partition.
+
+## Example: configuration data with locality-preferred reads
+
+A model that's read often but written rarely — tenant settings, say —
+benefits from `GeoFlexible`: every region gets a read replica, while writes
+route through to the home region:
+
+```go
+type TenantSettings struct {
+	ID    orm.ID `orm:"pk"`
+	Key   string `orm:"unique"`
+	Value string
+}
+
+orm.Register[TenantSettings](db, orm.CRUD(),
+	orm.GeoFlexible(orm.WriteForwarding()), // write on a replica -> forwarded to the home region
+)
+
+settings := orm.Repo[TenantSettings](db)
+
+// Home EU, replicas in US and AP right when it's created:
+ctx = orm.WithGeo(ctx, "eu-central", orm.ReplicateTo("us-east", "ap-south"))
+_ = settings.Insert(ctx, &TenantSettings{Key: "theme", Value: "dark"})
+
+// An instance in us-east then reads locally, no cross-region latency —
+// without app code ever asking for that explicitly.
+```
+
+Without `orm.WriteForwarding()`, the same write attempt from a us-east
+instance would be rejected with an error (`orm.WriteHomeOnly()`, the
+default) — replicas are then strictly read-only.

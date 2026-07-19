@@ -35,3 +35,34 @@ db, err := orm.Open(orm.Postgres(dsn),
   sortierbar** — die DB kann Ciphertext nicht sinnvoll vergleichen.
 - **v1-Umfang:** `encrypted` wirkt auf CRUD-Modellen. Auf EventSourced-Modellen
   wird es aktuell bei `Migrate` abgelehnt und folgt in einer späteren Version.
+
+## Beispiel: Schlüsselrotation
+
+`StaticKey` reicht für den Einstieg, ist aber ein einzelner Schlüssel ohne
+Rotation. Für den Produktivbetrieb implementiert man `orm.KeyProvider` selbst
+— zum Beispiel gegen ein KMS, das mehrere Schlüsselversionen kennt:
+
+```go
+type kmsKeys struct{ kms *kms.Client }
+
+// CurrentKey liefert den Schlüssel, mit dem NEU geschrieben wird.
+func (k kmsKeys) CurrentKey() (id string, key []byte, err error) {
+	return k.kms.CurrentKeyID(), k.kms.Fetch(k.kms.CurrentKeyID()), nil
+}
+
+// Key löst eine im Ciphertext gespeicherte Key-ID beim LESEN auf.
+func (k kmsKeys) Key(id string) ([]byte, error) {
+	return k.kms.Fetch(id), nil
+}
+
+db, err := orm.Open(orm.Postgres(dsn),
+	orm.Encryption(kmsKeys{kms: kmsClient}),
+)
+```
+
+Rotation braucht keinen Migrationsschritt: sobald das KMS eine neue
+`CurrentKeyID()` liefert, verschlüsseln alle folgenden Schreibvorgänge damit.
+Alte Zeilen bleiben lesbar, weil ihr Ciphertext die ursprüngliche Key-ID trägt
+und `Key(id)` sie auflöst — Alt- und Neuschlüssel koexistieren, bis ein
+Batch-Migrationsprozess (siehe [Migration](/guides/migration/)) die
+Bestandszeilen bei Gelegenheit neu verschlüsselt.

@@ -57,3 +57,53 @@ Register, alle Regionen mit Backfill fertig.
    schaltet auf `expanding`, dann `backfill`, dann `dual-write`.
 2. Alte Instanzen abbauen (Instanzregister leert sich).
 3. `FinalizeMigration` — von einem Betriebs-Job oder manuell.
+
+## Beispiel: Batch-Migrationsskript mit eigenem Checkpoint
+
+`BatchScript` selbst legt keine Iterationsstrategie fest — das Skript nutzt
+die normalen Query- und Update-APIs und sichert seinen eigenen Fortschritt.
+So sieht eine Normalisierung aus, die bei einem Neustart genau dort
+weitermacht, wo sie unterbrochen wurde:
+
+```go
+orm.MigrationTo(db, 4,
+	orm.BatchScript("normalize-email", func(ctx context.Context, b orm.Batch) error {
+		zuletzt, err := b.Checkpoint(ctx) // "" beim allerersten Lauf
+		if err != nil {
+			return err
+		}
+
+		var verarbeitet int64
+		for konto, err := range orm.Query[ProviderAccount](db, ctx).
+			Where(orm.Gt("ID", zuletzt)).
+			OrderBy("ID", orm.Asc).
+			Iter() {
+			if err != nil {
+				return err
+			}
+			normalisiert := strings.ToLower(strings.TrimSpace(konto.Email))
+			if normalisiert == konto.Email {
+				continue
+			}
+			if _, err := orm.Query[ProviderAccount](db, ctx).
+				Where(orm.Eq("ID", konto.ID)).
+				UpdateSet(orm.Set("Email", normalisiert)); err != nil {
+				return err
+			}
+			verarbeitet++
+			if verarbeitet%500 == 0 { // alle 500 Zeilen checkpointen, nicht jede einzelne
+				if err := b.SaveCheckpoint(ctx, konto.ID.String(), verarbeitet); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}),
+)
+```
+
+Bricht der Prozess mitten im Lauf ab, findet der nächste Versuch über
+`b.Checkpoint(ctx)` die zuletzt gesicherte ID wieder und setzt die
+`Where(orm.Gt("ID", zuletzt))`-Bedingung genau dort fort — das Skript muss
+dafür nur idempotent aufsetzbar sein, nicht das gesamte Backfill neu
+berechnen.

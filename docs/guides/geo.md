@@ -53,3 +53,34 @@ sonst antwortet die Heimatregion.
 **Geo-Pinning (ES):** Das Daten-Geo klebt ab dem ersten Event am Aggregat.
 `WithGeo` bestimmt die Heimatregion bei der Entstehung; Folge-Appends schreiben
 immer in die Heimat-Partition.
+
+## Beispiel: Konfigurationsdaten mit lokal-bevorzugtem Lesen
+
+Ein Model, das häufig gelesen, aber selten geschrieben wird — etwa
+Mandanten-Einstellungen — profitiert von `GeoFlexible`: jede Region bekommt
+eine lesende Kopie, Schreibzugriffe laufen zur Heimatregion durch:
+
+```go
+type TenantSettings struct {
+	ID    orm.ID `orm:"pk"`
+	Key   string `orm:"unique"`
+	Value string
+}
+
+orm.Register[TenantSettings](db, orm.CRUD(),
+	orm.GeoFlexible(orm.WriteForwarding()), // Schreiben auf Replikat -> zur Heimat weitergeleitet
+)
+
+settings := orm.Repo[TenantSettings](db)
+
+// Heimat EU, Replikate in US und AP direkt beim Anlegen:
+ctx = orm.WithGeo(ctx, "eu-central", orm.ReplicateTo("us-east", "ap-south"))
+_ = settings.Insert(ctx, &TenantSettings{Key: "theme", Value: "dark"})
+
+// Eine Instanz in us-east liest anschließend lokal, ohne Cross-Region-Latenz —
+// ganz ohne dass App-Code das explizit anfordert.
+```
+
+Ohne `orm.WriteForwarding()` würde derselbe Schreibversuch auf einer
+us-east-Instanz mit einem Fehler abgelehnt (`orm.WriteHomeOnly()`, der
+Default) — Replikate sind dann strikt lesend.

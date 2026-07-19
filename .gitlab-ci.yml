@@ -114,6 +114,7 @@ docs-build:
   needs: []
   variables:
     DOCS_TITLE: "ORM++"
+    DOCS_REPO: "https://gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
