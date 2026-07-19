@@ -61,6 +61,6 @@ tenant-los. Single-Tenant-Apps setzen einmal beim Start `orm.SingleTenant`.
 
 ## Weiter
 
-- [Modelle deklarieren](/de/guides/models/)
-- [CRUD-Modelle](/de/guides/crud/)
-- [Event Sourcing](/de/guides/event-sourcing/)
+- [Modelle deklarieren](/guides/models/)
+- [CRUD-Modelle](/guides/crud/)
+- [Event Sourcing](/guides/event-sourcing/)

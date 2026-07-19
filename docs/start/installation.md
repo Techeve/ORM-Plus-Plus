@@ -34,4 +34,4 @@ orm.Postgres(dsn string)  // Server, On-Prem (pgx-Pool)
 orm.Yugabyte(dsn string)  // verteilt; DSN sollte regional nahe Endpunkte enthalten
 ```
 
-Weiter zum [Schnellstart](/de/start/quickstart/).
+Weiter zum [Schnellstart](/start/quickstart/).

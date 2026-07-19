@@ -92,4 +92,4 @@ Ziel ist `TenantFree` oder `GeoGlobal`-Stammdaten). `ondelete`:
 
 ## Feld-Verschlüsselung
 
-Siehe [Verschlüsselung](/de/guides/encryption/).
+Siehe [Verschlüsselung](/guides/encryption/).

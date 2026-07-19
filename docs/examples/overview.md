@@ -40,4 +40,4 @@ ORMPP_TEST_BACKEND=yugabyte ORMPP_TEST_DSN="postgres://yugabyte@localhost:5434/y
 ```
 
 Ein konkretes Ende-zu-Ende-Beispiel steht unter
-[Todo-App](/de/examples/todo/).
+[Todo-App](/examples/todo/).

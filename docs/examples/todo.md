@@ -49,4 +49,4 @@ func main() {
 
 Wird aus `Todo` ein Aggregat mit Historie, ändert sich nur die Deklaration —
 die Betriebslogik (`Migrate`/`StartWorkers`) bleibt gleich. Siehe
-[Event Sourcing](/de/guides/event-sourcing/).
+[Event Sourcing](/guides/event-sourcing/).

@@ -54,4 +54,4 @@ err = tenants.Export(ctx, id, w)
 err = tenants.Purge(ctx, id)
 ```
 
-Siehe auch [Geo-Partitionierung](/de/guides/geo/).
+Siehe auch [Geo-Partitionierung](/guides/geo/).

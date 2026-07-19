@@ -47,5 +47,5 @@ Konsequenzen für die API:
 
 ## Weiter
 
-- [Installation](/de/start/installation/)
-- [Schnellstart](/de/start/quickstart/)
+- [Installation](/start/installation/)
+- [Schnellstart](/start/quickstart/)
