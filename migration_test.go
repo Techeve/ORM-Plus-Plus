@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -398,8 +399,10 @@ func TestFinalizeGuards(t *testing.T) {
 // Regression: eine per ALTER ADD COLUMN nachgerüstete JSON-Spalte muss für
 // Bestandszeilen lesbar sein. Vor dem Fix befüllte das Text-Zero-Literal ”
 // die Zeilen — json.Unmarshal("") scheiterte mit "unexpected end of JSON
-// input". Jetzt gilt: Zero-Literal ist 'null', und leere Zellen zählen beim
-// Lesen wie NULL (Zero-Value).
+// input". Jetzt ist das Zero-Literal 'null' (gültiges JSON auf allen
+// Backends). Die Heilung von ”-Altbeständen testet
+// TestDecodeJSONHealsLegacyEmptyCell — ”-Zellen kann es nur auf SQLite
+// geben (TEXT-Spalte); JSONB auf PG/YB lehnt ” physisch ab.
 func TestAlterAddedJSONColumnReadsAsZero(t *testing.T) {
 	store := newTestStore(t)
 	bg := context.Background()
@@ -452,19 +455,6 @@ func TestAlterAddedJSONColumnReadsAsZero(t *testing.T) {
 			t.Fatalf("rows = %+v", rows)
 		}
 
-		// Heilung von Alt-Beständen: Zellen mit '' (vor dem Fix erzeugt)
-		// lesen sich ebenfalls als Zero-Value statt zu scheitern.
-		if _, err := db.q().ExecContext(ctx, `UPDATE "widget" SET "tags" = ''`); err != nil {
-			t.Fatalf("'' provozieren: %v", err)
-		}
-		rows, err = Query[Widget](db, ctx).All()
-		if err != nil {
-			t.Fatalf("leere JSON-Zelle lesen: %v", err)
-		}
-		if len(rows) != 1 || rows[0].Tags != nil {
-			t.Fatalf("rows nach '' = %+v", rows)
-		}
-
 		// Schreiben und Zurücklesen funktioniert normal weiter.
 		w := rows[0]
 		w.Tags = []string{"a", "b"}
@@ -475,5 +465,39 @@ func TestAlterAddedJSONColumnReadsAsZero(t *testing.T) {
 		if err != nil || len(w.Tags) != 2 {
 			t.Fatalf("roundtrip = %+v (%v)", w, err)
 		}
+	}
+}
+
+// Heilung von ”-Altbeständen (vom alten Text-Zero-Literal auf SQLite
+// hinterlassen): leere JSON-Zellen zählen beim Dekodieren wie NULL statt an
+// json.Unmarshal zu scheitern. Bewusst ein Unit-Test der Dekodierung — auf
+// PG/YB kann ” in einer JSONB-Spalte gar nicht existieren, also lässt sich
+// der Zustand dort nicht verhaltensgleich provozieren; der Dekodier-Pfad
+// selbst ist backend-frei und damit überall identisch.
+func TestDecodeJSONHealsLegacyEmptyCell(t *testing.T) {
+	f := &field{column: "tags", dk: dJSON}
+
+	for name, raw := range map[string]any{
+		"leerer String": "",
+		"leeres Blob":   []byte{},
+		"NULL":          nil,
+	} {
+		tags := []string{"vorbelegt"} // beweist, dass wirklich genullt wird
+		target := reflect.ValueOf(&tags).Elem()
+		if err := decodeField(nil, f, target, raw); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if tags != nil {
+			t.Fatalf("%s: tags = %+v, erwartet Zero-Value", name, tags)
+		}
+	}
+
+	// Gültiges JSON dekodiert unverändert weiter.
+	var tags []string
+	if err := decodeField(nil, f, reflect.ValueOf(&tags).Elem(), `["a","b"]`); err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 2 || tags[0] != "a" {
+		t.Fatalf("tags = %+v", tags)
 	}
 }
