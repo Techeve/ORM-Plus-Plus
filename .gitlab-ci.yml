@@ -109,6 +109,9 @@ docs-build:
   image: registry.techeve.de/techeve/docs-builder:starlight-0.41.3
   tags:
     - docker
+  # Markdown haengt nicht von der Go-Testsuite ab — ohne needs: [] wuerde ein
+  # flakiger Datenbanktest die Veroeffentlichung der Doku verhindern.
+  needs: []
   variables:
     DOCS_TITLE: "ORM++"
   rules:
