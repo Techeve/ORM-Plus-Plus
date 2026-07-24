@@ -103,9 +103,17 @@ func (d *DB) compileReplace(rs *replaceStep) (*compiledReplace, error) {
 	if newM.kind != kindCRUD {
 		return nil, fmt.Errorf("orm: ReplaceModel: %s ist event-sourced — ES-Umbauten laufen über Events/Upcaster", newM.name)
 	}
-	// Alt-Struct in einer Scratch-Registry kompilieren (nicht Teil des Schemas).
+	// Alt-Struct in einer Scratch-Registry kompilieren (nicht Teil des
+	// Schemas). Die Tenant-Bindung erbt es vom Ziel-Model: ein Umbau ändert
+	// die Bindung per Konvention nie, und die Alt-Tabelle eines
+	// TenantFree-Models hat keine tenant_id-Spalte — sie tenant-gebunden zu
+	// lesen würde den Backfill brechen.
 	tmp := newRegistry()
-	register(tmp, rs.oldType, CRUD())
+	if newM.tenanted() {
+		register(tmp, rs.oldType, CRUD())
+	} else {
+		register(tmp, rs.oldType, CRUD(), TenantFree())
+	}
 	if len(tmp.errs) > 0 {
 		return nil, fmt.Errorf("orm: ReplaceModel: Alt-Struct %s: %w", rs.oldType.Name(), joinErrs(tmp.errs))
 	}
@@ -113,9 +121,6 @@ func (d *DB) compileReplace(rs *replaceStep) (*compiledReplace, error) {
 	oldM.table = oldTableName(rs.oldType.Name())
 	if oldM.table == newM.table {
 		return nil, fmt.Errorf("orm: ReplaceModel: %s und %s bilden auf dieselbe Tabelle %q ab", rs.oldType.Name(), newM.name, oldM.table)
-	}
-	if oldM.tenanted() != newM.tenanted() {
-		return nil, fmt.Errorf("orm: ReplaceModel: Tenant-Bindung von %s und %s muss übereinstimmen", oldM.name, newM.name)
 	}
 	return &compiledReplace{
 		step: rs,

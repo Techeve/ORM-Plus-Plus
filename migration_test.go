@@ -501,3 +501,73 @@ func TestDecodeJSONHealsLegacyEmptyCell(t *testing.T) {
 		t.Fatalf("tags = %+v", tags)
 	}
 }
+
+// TenantFree-Modelle müssen genauso ersetzbar sein: die Alt-Tabelle hat
+// keine tenant_id-Spalte — das Alt-Struct erbt die Bindung des Ziel-Models
+// (Regression: compileReplace kompilierte das Alt-Struct immer
+// tenant-gebunden und scheiterte an der Bindungsprüfung).
+type Directory struct { // altes TenantFree-Model (v1)
+	ID   ID     `orm:"pk"`
+	Name string `orm:"required"`
+	Kind string
+}
+
+type DirectoryV1 struct { // eingefrorene Kopie (liest Tabelle "directory")
+	ID   ID     `orm:"pk"`
+	Name string `orm:"required"`
+	Kind string
+}
+
+type Catalog struct { // neues TenantFree-Model (v2)
+	ID    ID     `orm:"pk"`
+	Title string `orm:"required"`
+}
+
+func TestReplaceModelTenantFree(t *testing.T) {
+	store := newTestStore(t)
+	bg := context.Background()
+
+	db1, err := Open(store())
+	if err != nil {
+		t.Fatalf("Open v1: %v", err)
+	}
+	Register[Directory](db1, CRUD(), TenantFree())
+	SchemaVersion(db1, 1)
+	if err := db1.Migrate(bg); err != nil {
+		t.Fatalf("Migrate v1: %v", err)
+	}
+	ctx := WithTenant(bg, SingleTenant)
+	d := &Directory{Name: "Stammdaten", Kind: "global"}
+	if err := Repo[Directory](db1).Insert(ctx, d); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if err := db1.Close(); err != nil {
+		t.Fatalf("Close v1: %v", err)
+	}
+
+	db2, err := Open(store())
+	if err != nil {
+		t.Fatalf("Open v2: %v", err)
+	}
+	t.Cleanup(func() { db2.Close() })
+	Register[Catalog](db2, CRUD(), TenantFree())
+	SchemaVersion(db2, 2)
+	MigrationTo(db2, 2,
+		ReplaceModel[DirectoryV1, Catalog](func(_ context.Context, old DirectoryV1) (Catalog, error) {
+			return Catalog{Title: old.Name + " (" + old.Kind + ")"}, nil
+		}),
+	)
+	if err := db2.Migrate(bg); err != nil {
+		t.Fatalf("Migrate v2: %v", err)
+	}
+	got, err := Repo[Catalog](db2).Get(ctx, d.ID)
+	if err != nil {
+		t.Fatalf("Catalog nach Backfill: %v", err)
+	}
+	if got.Title != "Stammdaten (global)" {
+		t.Fatalf("Transformation falsch: %+v", got)
+	}
+	if err := db2.FinalizeMigration(bg, 2); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+}
