@@ -1,5 +1,7 @@
 stages:
   - test
+  - build
+  - deploy
   - release
 
 default:
@@ -97,23 +99,41 @@ lint:
     - if: $CI_COMMIT_BRANCH
     - if: $CI_COMMIT_TAG
 
-# Dokumentations-Site (Astro Starlight, docs/) bauen — laeuft nur bei
-# Aenderungen unter docs/, damit unabhaengige Commits nicht ausgebremst werden.
-docs:
-  stage: test
-  image: node:22
-  script:
-    - cd docs
-    - npm ci
-    - npm run build
-  artifacts:
-    paths: [docs/dist/]
-    expire_in: 2 weeks
+# Dokumentation: Markdown unter docs/ wird vom zentralen Builder-Image
+# (techeve/docs-builder) gebaut und per FTP ausgeliefert. Das Repo enthaelt
+# bewusst keine Astro-/Node-Konfiguration — `docs-build` und `docs-deploy`
+# sind Kommandos im Image. DOCS_URL und DOC_FTP_PATH liegen als (geschuetzte)
+# Projektvariablen, die FTP-Zugangsdaten als Gruppenvariablen unter techeve.
+docs-build:
+  stage: build
+  image: registry.techeve.de/techeve/docs-builder:starlight-0.41.3
+  tags:
+    - docker
+  # Markdown haengt nicht von der Go-Testsuite ab — ohne needs: [] wuerde ein
+  # flakiger Datenbanktest die Veroeffentlichung der Doku verhindern.
+  needs: []
+  variables:
+    DOCS_TITLE: "ORM++"
+    DOCS_REPO: "https://gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
   rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      changes: [docs/**/*]
-    - if: $CI_COMMIT_BRANCH
-      changes: [docs/**/*]
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - docs-build
+  artifacts:
+    paths:
+      - public
+
+docs-deploy:
+  stage: deploy
+  image: registry.techeve.de/techeve/docs-builder:starlight-0.41.3
+  tags:
+    - docker
+  needs:
+    - docs-build
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - docs-deploy
 
 # Performance-Benchmark auf dem Runner (konstante Hardware) — MANUELL
 # startbar (Play-Button), blockiert die Pipeline nicht. Artefakte:

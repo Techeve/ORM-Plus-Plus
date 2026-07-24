@@ -1,0 +1,51 @@
+---
+title: ORM++
+description: Model-first Persistenz für Go — klassisches ORM plus Event Sourcing, Projektionen, Snapshots und Expand/Contract-Migrationen, verhaltensgleich auf SQLite, PostgreSQL und YugabyteDB.
+template: splash
+hero:
+  tagline: Eine Anwendung. Ein Code. Drei Datenbanken. Kein SQL.
+  image:
+    file: ./hero.svg
+    alt: Eine Go-Anwendung spricht mit ORM++, das dieselbe API auf SQLite, PostgreSQL und YugabyteDB abbildet.
+  actions:
+    - text: Erste Schritte
+      link: /start/introduction/
+      icon: right-arrow
+    - text: Auf GitLab ansehen
+      link: https://gitlab.techeve.de/orm-plus-plus/orm-plus-plus
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+## Was ist ORM++?
+
+**ORM++** ist ein model-first Persistenz-Modul für Go: die Anwendung deklariert
+Modelle als Go-Structs mit Tags und arbeitet mit Commands, Events und typisierten
+Queries — sie schreibt **kein SQL** und kennt keine Datenbank-Details.
+
+<CardGrid stagger>
+  <Card title="ORM + Event Sourcing" icon="seti:go">
+    Klassische CRUD-Modelle **und** Event-Sourced-Aggregate mit CloudEvents,
+    Snapshots und Archivierung — im selben Modul, in einer Transaktion.
+  </Card>
+  <Card title="Verhaltensgleich" icon="approve-check">
+    Dieselbe Anwendung läuft byte-identisch auf **SQLite**, **PostgreSQL** und
+    **YugabyteDB**. App-Code verzweigt nie nach dem Backend.
+  </Card>
+  <Card title="Multi-Tenancy & Geo" icon="puzzle">
+    Tenant- und Geo-Scope sind ab v1 im Datenmodell verankert und werden
+    strukturell (fail-closed) durchgesetzt.
+  </Card>
+  <Card title="Migrationen ohne Ausfall" icon="rocket">
+    Expand/Contract mit Dual-Write: alte und neue App-Version laufen während
+    der Migration parallel.
+  </Card>
+</CardGrid>
+
+## Weiter geht's
+
+- [Einführung](/start/introduction/) — Grundprinzip und Überblick
+- [Schnellstart](/start/quickstart/) — in fünf Minuten lauffähig
+- [Beispiele](/examples/overview/) — vollständige Anwendungen
