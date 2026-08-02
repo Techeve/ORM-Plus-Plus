@@ -83,8 +83,10 @@ test-yugabyte:
     ORMPP_TEST_BACKEND: yugabyte
     ORMPP_TEST_DSN: postgres://yugabyte@yugabyte:5433/yugabyte
   script:
-    # Warten, bis YSQL antwortet (yugabyted braucht nach dem Start etwas).
-    - for i in $(seq 1 90); do (echo > /dev/tcp/yugabyte/5433) 2>/dev/null && break; sleep 2; done
+    # Auf die Bereitschaft wartet die Suite selbst (warteAufBackend in
+    # backend_test.go): ein offener TCP-Port ist kein Nachweis, YugabyteDB
+    # nimmt ihn entgegen, bevor YSQL Verbindungen annimmt.
+    #
     # -parallel 8: die Tests sind unabhaengig (eigenes Schema je Test) und
     # warten fast nur auf YB-Konsens — Nebenlaeufigkeit senkt die Wanduhr
     # um ein Vielfaches, ohne Rechenlast zu erzeugen.

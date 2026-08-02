@@ -1,6 +1,7 @@
 package orm
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -34,6 +36,9 @@ func newTestStore(t *testing.T) func() Driver {
 		dsn := os.Getenv("ORMPP_TEST_DSN")
 		if dsn == "" {
 			t.Fatalf("ORMPP_TEST_DSN fehlt für Backend %q", backend)
+		}
+		if err := warteAufBackend(dsn); err != nil {
+			t.Fatalf("Backend nicht bereit: %v", err)
 		}
 		var raw [8]byte
 		if _, err := rand.Read(raw[:]); err != nil {
@@ -74,4 +79,40 @@ func newTestStore(t *testing.T) func() Driver {
 		t.Fatalf("unbekanntes ORMPP_TEST_BACKEND %q", backend)
 		return nil
 	}
+}
+
+// warteAufBackend blockiert, bis das Backend wirklich SQL annimmt.
+//
+// Ein offener TCP-Port genügt als Nachweis nicht: YugabyteDB nimmt auf
+// 5433 schon Verbindungen entgegen, wenn die YSQL-Schicht noch startet —
+// die Suite scheiterte dann reihenweise an "failed to connect". Der
+// Runner-Health-Check gibt ohnehin nach 30 Sekunden auf, also wartet die
+// Suite selbst, einmal für alle Tests.
+var (
+	backendBereit sync.Once
+	backendFehler error
+)
+
+func warteAufBackend(dsn string) error {
+	backendBereit.Do(func() {
+		frist := time.Now().Add(3 * time.Minute)
+		for {
+			db, err := sql.Open("pgx", dsn)
+			if err == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				err = db.PingContext(ctx)
+				cancel()
+				_ = db.Close()
+				if err == nil {
+					return
+				}
+			}
+			if time.Now().After(frist) {
+				backendFehler = err
+				return
+			}
+			time.Sleep(2 * time.Second)
+		}
+	})
+	return backendFehler
 }
