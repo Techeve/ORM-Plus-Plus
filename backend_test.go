@@ -95,7 +95,12 @@ var (
 
 func warteAufBackend(dsn string) error {
 	backendBereit.Do(func() {
-		frist := time.Now().Add(3 * time.Minute)
+		// Grosszuegig: der YugabyteDB-Container braucht auf den CI-Runnern
+		// beobachtet mehrere Minuten bis YSQL antwortet, mal unter drei, mal
+		// darueber. Die Suite selbst laeuft nebenlaeufig in gut einer Minute,
+		// es ist also Luft — lieber warten als reihenweise an
+		// "failed to connect" scheitern.
+		frist := time.Now().Add(7 * time.Minute)
 		for {
 			db, err := sql.Open("pgx", dsn)
 			if err == nil {
