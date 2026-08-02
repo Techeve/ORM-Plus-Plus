@@ -84,8 +84,13 @@ Tests: `crud_test.go` (Phase 1), `es_test.go` (Phase 2), `migration_test.go` (Ph
 | Thema | Verhalten heute | Geplant |
 |---|---|---|
 | `encrypted` auf ES-Modellen (Payloads/Snapshots) | Migrate lehnt klar ab; CRUD voll unterstützt | später |
-| Physische GeoFlexible-Replikation (Fanout, YB-Placement) | Heimat/Replikate als validierte Metadaten (`geo`, `geo_replicas`); kollabierte Backends | Stufe 2 |
-| `ormpp_geo_regions`-Lebenszyklus (bootstrapping/draining) | Regionen sofort active | Stufe 2 |
+| Physischer GeoFlexible-**Replikat**-Fanout (lesende Kopien in weiteren Regionen) | Replikat-Liste als validierte Metadaten (`geo_replicas`); die **Heimatregion** liegt physisch richtig (Placement) | Stufe 2 |
+| `ormpp_geo_regions`-Lebenszyklus (bootstrapping/draining) | Regionen sofort active; Entfernen explizit über `RemoveRegion` | Stufe 2 |
+| Umbinden bestehender Partitionen an ein anderes Placement | `Migrate` meldet `ErrPlacementMismatch` (kein `ALTER SET TABLESPACE` — das bewegt auf YB keine Tablets) | Betriebsaktion |
+| Cross-Geo-Unique/Referenz unter echter Nebenläufigkeit | Engine-Prüfung vor dem Schreiben (`ErrUniqueConflict`, `checkRef`); das Wettlauf-Restrisiko ist über Partitionsgrenzen nicht constraint-durchsetzbar (bekannte Partitionierungs-Grenze, wie beim ES-Geo-Pinning) | dokumentiert |
+| Cross-Geo-Unique-Vorprüfung bei Bulk-`UpdateSet` | Query-Builder-Massenupdates laufen ohne die Engine-Unique-Vorprüfung (physischer Index fängt Konflikte nur pro Geo) | später |
+
+**Geo-Partitionierung ist Kernfähigkeit:** Sobald eine Topologie deklariert ist, sind auf PG/YB **alle** Tabellen eines Nicht-GeoGlobal-Models nach `geo` partitioniert — CRUD, ES-Read-Model, Event-Log, Archiv und Snapshots. `Migrate` überführt unpartitionierte Bestands-Tabellen selbsttätig (stepwise, wiederaufnehmbar, lease-koordiniert; Suffix `_vorgeo` während des Umbaus). FKs auf partitionierte Ziele sind nicht darstellbar (PG verlangt Unique inkl. Partitionsschlüssel) — dort prüft die Engine: `checkRef` beim Schreiben, restrict-Vorprüfung, setnull/cascade-Emulation beim Löschen, Cross-Geo-Unique-Vorprüfung (`ErrUniqueConflict`), zweistufiger Upsert. Diese Engine-Semantik hängt an der **Topologie**, nicht am Backend — SQLite verhält sich identisch (Verhaltensgleichheit).
 | Snapshot-/Archiv-Kompression (zstd) | unkomprimiert (SQL-abfragbar) | später |
 | Archiv per Partition-Detach (statt Kopie) | Nebentabellen-Kopie auf allen Backends | Optimierung |
 | Dual-Write-Rückrichtung (neu→alt) | einseitig alt→neu via Trigger-Nachlauf | `ReplaceModel`-Option, später |

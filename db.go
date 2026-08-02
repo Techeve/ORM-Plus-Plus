@@ -211,6 +211,28 @@ func (d *DB) persistTopology(ctx context.Context) error {
 	return nil
 }
 
+// geoPartitioned: physische Geo-Partitionierung ist aktiv — das Backend
+// partitioniert nativ UND eine Topologie ist deklariert. Steuert nur die
+// physische Ablage (DDL, Conflict-Targets), nie Verhalten.
+func (d *DB) geoPartitioned() bool {
+	return d.dial.partitionClause() != "" && len(d.regions) > 0
+}
+
+// partModel: die Tabellen dieses Models sind physisch geo-partitioniert.
+// GeoGlobal-Modelle sind per Definition in allen Regionen — unpartitioniert.
+func (d *DB) partModel(m *model) bool {
+	return d.geoPartitioned() && m.opts.geoMode != geoGlobal
+}
+
+// geoEngine: die Engine übernimmt Constraint-Semantik, die auf
+// partitionierten Tabellen kein natives Pendant hat (FK-Ziel, Cross-Geo-
+// Unique, Upsert-Zielwahl). Bewusst NUR an der Topologie festgemacht,
+// nicht am Backend: SQLite kollabiert physisch, verhält sich aber
+// identisch — sonst bräche die Verhaltensgleichheit.
+func (d *DB) geoEngine(m *model) bool {
+	return len(d.regions) > 0 && m.opts.geoMode != geoGlobal
+}
+
 // validGeo prüft ein Daten-Geo gegen die deklarierte Topologie.
 func (d *DB) validGeo(geo string) bool {
 	if len(d.regions) == 0 {
@@ -318,6 +340,12 @@ func (d *DB) Migrate(ctx context.Context, plans ...MigrationPlan) error {
 	if err := d.registerInstance(ctx); err != nil {
 		return err
 	}
+	// Vor jeder DDL: ein deklariertes Placement, das es nicht gibt, soll
+	// als solches gemeldet werden und nicht als Tablespace-Fehler mitten
+	// im CREATE TABLE.
+	if err := d.verifyPlacements(d.regionPlacements()); err != nil {
+		return err
+	}
 
 	st, err := d.readSchemaState(ctx)
 	if err != nil {
@@ -350,7 +378,25 @@ func (d *DB) Migrate(ctx context.Context, plans ...MigrationPlan) error {
 		}
 	}
 
+	// Bewusst außerhalb der Versions-Fallunterscheidung: ES-Nebentabellen
+	// (inkl. der geo-Spalte der Snapshots) müssen auch bei unveränderter
+	// Schema-Version entstehen — Bibliotheks-Upgrades ändern die
+	// App-Schema-Version nicht. Idempotent, No-op wenn alles da ist.
+	for _, m := range d.reg.ordered {
+		if m.kind == kindEventSourced {
+			if err := d.ensureESTables(ctx, m); err != nil {
+				return err
+			}
+		}
+	}
 	if err := d.persistTopology(ctx); err != nil {
+		return err
+	}
+	// Ebenso versionsunabhängig: eine Region, die erst nachträglich
+	// deklariert wird, ändert die Schema-Version nicht — ihre Partitionen
+	// (und der Umbau unpartitionierter Bestands-Tabellen) müssen trotzdem
+	// passieren.
+	if err := d.reconcileGeoPartitions(ctx); err != nil {
 		return err
 	}
 	if err := d.tenants.bootstrap(ctx); err != nil {

@@ -110,17 +110,180 @@ func (pgDialect) forUpdate() string { return " FOR UPDATE" }
 func (pgDialect) partitionClause() string { return ` PARTITION BY LIST ("geo")` }
 
 // partitionSQL: eine LIST-Partition je deklarierter Region plus eine
-// DEFAULT-Partition für 'local' und noch nicht deklarierte Geos. Auf YB
-// binden Placement/Tablespaces später an die Regions-Partitionen (Stufe 2).
-func (pgDialect) partitionSQL(table string, regions []string) []string {
+// DEFAULT-Partition für 'local' und noch nicht deklarierte Geos. Ist für
+// eine Region ein Placement deklariert, landet ihre Partition im
+// zugehörigen Tablespace — auf YB hält dessen replica_placement die
+// Zeilen physisch in der Region.
+func (pgDialect) partitionSQL(table string, regions []regionPlacement) []string {
 	stmts := []string{fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %q PARTITION OF %q DEFAULT`,
-		table+"_geo_default", table)}
+		geoPartName(table, geoDefaultRegion), table)}
 	for _, r := range regions {
-		stmts = append(stmts, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %q PARTITION OF %q FOR VALUES IN ('%s')`,
-			table+"_geo_"+r, table, strings.ReplaceAll(r, "'", "''")))
+		stmts = append(stmts, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %q PARTITION OF %q FOR VALUES IN (%s)%s`,
+			geoPartName(table, r.name), table, sqlLit(r.name), tablespaceClause(r.placement)))
 	}
 	return stmts
 }
+
+// adoptRegionSQL: Partition daneben anlegen — mit Tablespace, denn die
+// Bindung greift nur beim CREATE TABLE —, die Zeilen der Region aus der
+// DEFAULT-Partition dorthin umhängen und anschließen. Der deckungsgleiche
+// CHECK erspart ATTACH den Scan der neuen Partition.
+//
+// Bewusst ohne umschließende Transaktion: YB sieht das DELETE einer noch
+// offenen Transaktion beim ATTACH nicht und lehnt dann ab. Jede Anweisung
+// ist deshalb für sich wiederholbar — ein Abbruch wird beim nächsten
+// Migrate zu Ende geführt.
+func (pgDialect) adoptRegionSQL(table string, key []string, r regionPlacement) []string {
+	part := geoPartName(table, r.name)
+	def := geoPartName(table, geoDefaultRegion)
+	lit := sqlLit(r.name)
+	ck := "ck_" + part + "_geo"
+	match := make([]string, len(key))
+	for i, k := range key {
+		match[i] = fmt.Sprintf("p.%q = d.%q", k, k)
+	}
+	return []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %q (LIKE %q INCLUDING DEFAULTS INCLUDING CONSTRAINTS)%s`,
+			part, table, tablespaceClause(r.placement)),
+		fmt.Sprintf(`ALTER TABLE %q DROP CONSTRAINT IF EXISTS %q`, part, ck),
+		fmt.Sprintf(`ALTER TABLE %q ADD CONSTRAINT %q CHECK ("geo" = %s)`, part, ck, lit),
+		fmt.Sprintf(`INSERT INTO %q SELECT d.* FROM %q d WHERE d."geo" = %s
+			AND NOT EXISTS (SELECT 1 FROM %q p WHERE %s)`, part, def, lit, part, strings.Join(match, " AND ")),
+		fmt.Sprintf(`DELETE FROM %q WHERE "geo" = %s`, def, lit),
+		fmt.Sprintf(`ALTER TABLE %q ATTACH PARTITION %q FOR VALUES IN (%s)`, table, part, lit),
+		fmt.Sprintf(`ALTER TABLE %q DROP CONSTRAINT IF EXISTS %q`, part, ck),
+	}
+}
+
+func (pgDialect) placementExists(q queryer, name string) (bool, error) {
+	var one int
+	err := q.QueryRowContext(bgCtx(), `SELECT 1 FROM pg_tablespace WHERE spcname = ?`, name).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (pgDialect) geoPartitions(q queryer, table string) (map[string]string, error) {
+	rows, err := q.QueryContext(bgCtx(), `
+		SELECT pg_get_expr(c.relpartbound, c.oid), COALESCE(ts.spcname, '')
+		FROM pg_class p
+		JOIN pg_inherits i ON i.inhparent = p.oid
+		JOIN pg_class c ON c.oid = i.inhrelid
+		LEFT JOIN pg_tablespace ts ON ts.oid = c.reltablespace
+		WHERE p.relname = ? AND p.relnamespace = current_schema()::regnamespace`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	parts := map[string]string{}
+	for rows.Next() {
+		var bound, space string
+		if err := rows.Scan(&bound, &space); err != nil {
+			return nil, err
+		}
+		parts[partitionRegion(bound)] = space
+	}
+	return parts, rows.Err()
+}
+
+// partitionRegion liest die Region aus einer Partitionsgrenze
+// ("FOR VALUES IN ('eu-central')" bzw. "DEFAULT"). Gelesen wird das erste
+// Literal; ORM++ legt je Region genau einen Wert an.
+func partitionRegion(bound string) string {
+	i := strings.IndexByte(bound, '\'')
+	if i < 0 {
+		return geoDefaultRegion
+	}
+	var b strings.Builder
+	for j := i + 1; j < len(bound); j++ {
+		if bound[j] != '\'' {
+			b.WriteByte(bound[j])
+			continue
+		}
+		if j+1 < len(bound) && bound[j+1] == '\'' { // '' = eingebettetes Hochkomma
+			b.WriteByte('\'')
+			j++
+			continue
+		}
+		break
+	}
+	return b.String()
+}
+
+func (pgDialect) tableKind(q queryer, table string) (byte, error) {
+	var kind string
+	err := q.QueryRowContext(bgCtx(), `
+		SELECT relkind FROM pg_class
+		WHERE relname = ? AND relnamespace = current_schema()::regnamespace
+		  AND relkind IN ('r', 'p')`, table).Scan(&kind)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return kind[0], nil
+}
+
+func (pgDialect) incomingFKs(q queryer, table string) ([][2]string, error) {
+	rows, err := q.QueryContext(bgCtx(), `
+		SELECT cl.relname, c.conname
+		FROM pg_constraint c
+		JOIN pg_class cl ON cl.oid = c.conrelid
+		JOIN pg_class tg ON tg.oid = c.confrelid
+		WHERE c.contype = 'f' AND tg.relname = ?
+		  AND tg.relnamespace = current_schema()::regnamespace
+		  AND cl.relname <> tg.relname`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var fks [][2]string
+	for rows.Next() {
+		var t, c string
+		if err := rows.Scan(&t, &c); err != nil {
+			return nil, err
+		}
+		fks = append(fks, [2]string{t, c})
+	}
+	return fks, rows.Err()
+}
+
+func (pgDialect) tableIndexes(q queryer, table string) ([]string, error) {
+	rows, err := q.QueryContext(bgCtx(),
+		`SELECT indexname FROM pg_indexes WHERE tablename = ? AND schemaname = current_schema()`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
+}
+
+func tablespaceClause(placement string) string {
+	if placement == "" {
+		return ""
+	}
+	return fmt.Sprintf(" TABLESPACE %q", placement)
+}
+
+// geoPartName ist der Tabellenname der Geo-Partition einer Region.
+func geoPartName(table, region string) string {
+	if region == geoDefaultRegion {
+		return table + "_geo_default"
+	}
+	return table + "_geo_" + region
+}
+
+func sqlLit(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 func (pgDialect) dualWriteTriggerSQL(table, pk string) []string {
 	fn := "ormpp_dw_" + table

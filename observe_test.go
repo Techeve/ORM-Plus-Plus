@@ -170,12 +170,28 @@ func TestSetGeoFlexible(t *testing.T) {
 		t.Fatalf("ReplicateAll: %q", reps)
 	}
 
-	// Guards: unbekannte Region, Nicht-GeoFlexible, fremder Tenant, ohne Tenant.
+	// GeoScoped zieht ohne Replikate um; Replikat-Optionen lehnt es ab.
+	p := &Plain{Name: "P"}
+	if err := Repo[Plain](db).Insert(eu, p); err != nil {
+		t.Fatal(err)
+	}
+	if err := Repo[Plain](db).SetGeo(ctx, p.ID, "us-east"); err != nil {
+		t.Fatalf("SetGeo auf GeoScoped: %v", err)
+	}
+	if err := db.q().QueryRowContext(bg, `SELECT geo FROM plain WHERE id = ?`, p.ID.String()).Scan(&geo); err != nil {
+		t.Fatal(err)
+	}
+	if geo != "us-east" {
+		t.Fatalf("GeoScoped-Umzug: geo=%q", geo)
+	}
+	if err := Repo[Plain](db).SetGeo(ctx, p.ID, "eu-central", ReplicateTo("us-east")); err == nil ||
+		!strings.Contains(err.Error(), "GeoFlexible") {
+		t.Fatalf("Replikate auf GeoScoped: %v", err)
+	}
+
+	// Guards: unbekannte Region, fremder Tenant, ohne Tenant.
 	if err := Repo[SyncGroup](db).SetGeo(ctx, g.ID, "mars"); !errors.Is(err, ErrRegionNotActive) {
 		t.Fatalf("SetGeo mars: %v", err)
-	}
-	if err := Repo[Plain](db).SetGeo(ctx, g.ID, "eu-central"); err == nil || !strings.Contains(err.Error(), "GeoFlexible") {
-		t.Fatalf("SetGeo auf GeoScoped: %v", err)
 	}
 	other, _ := db.Tenants().Create(bg, TenantInfo{Name: "X"})
 	if err := Repo[SyncGroup](db).SetGeo(WithTenant(bg, other.ID), g.ID, "eu-central"); !errors.Is(err, ErrNotFound) {

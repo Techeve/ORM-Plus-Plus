@@ -351,8 +351,14 @@ func (d *DB) transformAndUpsert(ctx context.Context, q queryer, cr *compiledRepl
 		}
 		updates = append(updates, fmt.Sprintf("%q = excluded.%q", c, c))
 	}
+	// Partitionierte Ziel-Tabelle: der Unique hinter ON CONFLICT ist
+	// (pk, geo); das Geo kommt unverändert aus der Alt-Zeile mit.
+	target := fmt.Sprintf("%q", m.pk.column)
+	if d.partModel(m) {
+		target = quoteAll(m.pk.column, "geo")
+	}
 	query := insertSQL(m.table, cols) + fmt.Sprintf(
-		" ON CONFLICT (%q) DO UPDATE SET %s", m.pk.column, strings.Join(updates, ", "))
+		" ON CONFLICT (%s) DO UPDATE SET %s", target, strings.Join(updates, ", "))
 	_, err = q.ExecContext(ctx, query, vals...)
 	return err
 }

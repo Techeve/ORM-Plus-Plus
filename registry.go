@@ -87,12 +87,13 @@ type model struct {
 	// (?-Platzhalter-Form; das Dialekt-Rebinding läuft weiter in dialq) —
 	// im Hot Path nur noch Lookup statt fmt.Sprintf pro Aufruf.
 	sqlc struct {
-		selectList string
-		insert     string
-		getByPK    string
-		update     string
-		upsert     string
-		deleteByPK string
+		selectList   string
+		insert       string
+		getByPK      string
+		update       string
+		upsert       string
+		upsertUpdate string // Upsert-Schritt 1 auf Geo-Modellen (ohne Versionsbedingung)
+		deleteByPK   string
 	}
 	// updateFields: die Nicht-pk-/Nicht-immutable-Felder in SET-Reihenfolge.
 	updateFields []*field
@@ -517,6 +518,18 @@ func (m *model) buildSQL() {
 			m.pk.column, strings.Join(upserts, ", "))
 	} else {
 		m.sqlc.upsert = m.sqlc.insert + fmt.Sprintf(" ON CONFLICT (%q) DO NOTHING", m.pk.column)
+	}
+	// Zweistufiger Upsert (Geo-Modelle): ON CONFLICT bräuchte auf
+	// partitionierten Tabellen (pk, geo) als Ziel und legte einen
+	// umgezogenen Datensatz unter altem Context-Geo doppelt an. Deshalb
+	// UPDATE nach pk (über alle Partitionen), bei 0 Zeilen INSERT —
+	// ohne Versionsbedingung, wie der native Upsert.
+	if len(sets) > 0 {
+		uu := fmt.Sprintf("UPDATE %q SET %s WHERE %q = ?", m.table, strings.Join(sets, ", "), m.pk.column)
+		if m.tenanted() {
+			uu += ` AND tenant_id = ?`
+		}
+		m.sqlc.upsertUpdate = uu
 	}
 
 	dq := fmt.Sprintf("DELETE FROM %q WHERE %q = ?", m.table, m.pk.column)

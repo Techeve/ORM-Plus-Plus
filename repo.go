@@ -165,8 +165,78 @@ func (r *repo[T]) Insert(ctx context.Context, e *T) error {
 	if err != nil {
 		return err
 	}
+	if err := r.checkUniques(ctx, e, tenant); err != nil {
+		return err
+	}
 	_, err = r.h.q().ExecContext(ctx, r.m.sqlc.insert, vals...)
 	return err
+}
+
+// checkUniques prüft Unique-Constraints engine-seitig über ALLE Regionen.
+// Nötig auf Geo-Modellen: der physische Unique-Index partitionierter
+// Tabellen enthält den Partitionsschlüssel und gilt damit nur pro Geo.
+// Läuft topologie-, nicht backend-abhängig — SQLite verhält sich identisch
+// (dort fängt zusätzlich der globale Index das Wettlauf-Restrisiko).
+func (r *repo[T]) checkUniques(ctx context.Context, e *T, tenant ID) error {
+	d := r.h.db()
+	if !d.geoEngine(r.m) {
+		return nil
+	}
+	rv := reflect.ValueOf(e).Elem()
+	self := rv.FieldByIndex(r.m.pk.index).Interface().(ID)
+
+	var sets [][]*field
+	for _, f := range r.m.fields {
+		if f.unique {
+			sets = append(sets, []*field{f})
+		}
+	}
+	for _, names := range r.m.opts.uniques {
+		set := make([]*field, len(names))
+		for i, n := range names {
+			set[i] = r.m.fieldByName(n)
+		}
+		sets = append(sets, set)
+	}
+
+check:
+	for _, set := range sets {
+		conds := make([]string, 0, len(set)+2)
+		args := make([]any, 0, len(set)+2)
+		for _, f := range set {
+			v, err := encodeField(d, f, rv.FieldByIndex(f.index))
+			if err != nil {
+				return err
+			}
+			if v == nil {
+				continue check // NULL kollidiert per SQL-Semantik nie
+			}
+			conds = append(conds, fmt.Sprintf("%q = ?", f.column))
+			args = append(args, v)
+		}
+		if r.m.tenanted() {
+			conds = append(conds, `"tenant_id" = ?`)
+			args = append(args, tenant.String())
+		}
+		conds = append(conds, fmt.Sprintf("%q <> ?", r.m.pk.column))
+		args = append(args, self.String())
+
+		var one int
+		err := r.h.q().QueryRowContext(ctx, fmt.Sprintf(
+			"SELECT 1 FROM %q WHERE %s", r.m.table, strings.Join(conds, " AND ")), args...).Scan(&one)
+		switch err {
+		case sql.ErrNoRows:
+		case nil:
+			names := make([]string, len(set))
+			for i, f := range set {
+				names[i] = f.name
+			}
+			return fmt.Errorf("%w: %s(%s)", ErrUniqueConflict, r.m.name, strings.Join(names, ", "))
+		default:
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *repo[T]) InsertMany(ctx context.Context, entities []*T, opts ...BatchOption) error {
@@ -200,6 +270,9 @@ func (r *repo[T]) InsertMany(ctx context.Context, entities []*T, opts ...BatchOp
 			for _, e := range chunk {
 				vals, err := cr.prepareWrite(ctx, e, tenant, geo)
 				if err != nil {
+					return err
+				}
+				if err := cr.checkUniques(ctx, e, tenant); err != nil {
 					return err
 				}
 				if _, err := stmt.ExecContext(ctx, vals...); err != nil {
@@ -296,6 +369,9 @@ func (r *repo[T]) Update(ctx context.Context, e *T) error {
 		vals = append(vals, oldVersion)
 	}
 
+	if err := r.checkUniques(ctx, e, tenant); err != nil {
+		return err
+	}
 	res, err := r.h.q().ExecContext(ctx, r.m.sqlc.update, vals...)
 	if err != nil {
 		return err
@@ -326,8 +402,45 @@ func (r *repo[T]) Upsert(ctx context.Context, e *T) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.h.q().ExecContext(ctx, r.m.sqlc.upsert, vals...)
-	return err
+	if err := r.checkUniques(ctx, e, tenant); err != nil {
+		return err
+	}
+	d := r.h.db()
+	if !d.geoEngine(r.m) || r.m.sqlc.upsertUpdate == "" {
+		_, err = r.h.q().ExecContext(ctx, r.m.sqlc.upsert, vals...)
+		return err
+	}
+	// Geo-Modelle: erst UPDATE nach pk (findet den Datensatz in JEDER
+	// Region — ein ON CONFLICT träfe nur das Context-Geo und legte einen
+	// umgezogenen Datensatz doppelt an), bei 0 Zeilen INSERT.
+	upsert := func(h Handle) error {
+		rv := reflect.ValueOf(e).Elem()
+		uvals := make([]any, 0, len(r.m.updateFields)+2)
+		for _, f := range r.m.updateFields {
+			v, err := encodeField(d, f, rv.FieldByIndex(f.index))
+			if err != nil {
+				return err
+			}
+			uvals = append(uvals, v)
+		}
+		uvals = append(uvals, rv.FieldByIndex(r.m.pk.index).Interface().(ID).String())
+		if r.m.tenanted() {
+			uvals = append(uvals, tenant.String())
+		}
+		res, err := h.q().ExecContext(ctx, r.m.sqlc.upsertUpdate, uvals...)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			return nil
+		}
+		_, err = h.q().ExecContext(ctx, r.m.sqlc.insert, vals...)
+		return err
+	}
+	if r.h.inTx() {
+		return upsert(r.h)
+	}
+	return d.Tx(ctx, func(tx Tx) error { return upsert(tx) })
 }
 
 func (r *repo[T]) Delete(ctx context.Context, id ID) error {
@@ -354,30 +467,140 @@ func (r *repo[T]) Delete(ctx context.Context, id ID) error {
 	if r.m.tenanted() {
 		args = append(args, tenant.String())
 	}
-	res, err := r.h.q().ExecContext(ctx, r.m.sqlc.deleteByPK, args...)
-	if err != nil {
-		return err
+	d := r.h.db()
+	// Auf Geo-Modellen ist kein FK auf diese Tabelle darstellbar
+	// (partitioniertes Ziel) — setnull/cascade übernimmt die Engine.
+	// Wo ein nativer FK existiert (SQLite, kollabierte Backends), hat er
+	// die Kinder schon behandelt und die Emulation findet nichts mehr vor.
+	emulate := false
+	if d.geoEngine(r.m) {
+		for _, by := range r.m.referencedBy {
+			for _, f := range by.fields {
+				if f.ref == r.m && f.refOn != odRestrict {
+					emulate = true
+				}
+			}
+		}
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+	del := func(h Handle) error {
+		res, err := h.q().ExecContext(ctx, r.m.sqlc.deleteByPK, args...)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		if emulate {
+			return d.emulateOnDelete(ctx, h, r.m, []string{id.String()})
+		}
+		return nil
+	}
+	if emulate && !r.h.inTx() {
+		return d.Tx(ctx, func(tx Tx) error { return del(tx) })
+	}
+	return del(r.h)
+}
+
+// emulateOnDelete zieht die ondelete-Semantik der Referenzen nach, die auf
+// partitionierten Zieltabellen kein natives Pendant haben: setnull leert
+// die Referenzspalte, cascade löscht rekursiv — mit restrict-Schutz auf
+// jeder Ebene, wie es der native FK täte.
+func (d *DB) emulateOnDelete(ctx context.Context, h Handle, m *model, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?, ", len(ids)), ", ")
+	idArgs := make([]any, len(ids))
+	for i, id := range ids {
+		idArgs[i] = id
+	}
+	for _, by := range m.referencedBy {
+		for _, f := range by.fields {
+			if f.ref != m {
+				continue
+			}
+			switch f.refOn {
+			case odSetNull:
+				if _, err := h.q().ExecContext(ctx, fmt.Sprintf(
+					"UPDATE %q SET %q = NULL WHERE %q IN (%s)", by.table, f.column, f.column, ph), idArgs...); err != nil {
+					return err
+				}
+			case odCascade:
+				rows, err := h.q().QueryContext(ctx, fmt.Sprintf(
+					"SELECT %q FROM %q WHERE %q IN (%s)", by.pkColumn(), by.table, f.column, ph), idArgs...)
+				if err != nil {
+					return err
+				}
+				var children []string
+				for rows.Next() {
+					var c string
+					if err := rows.Scan(&c); err != nil {
+						rows.Close()
+						return err
+					}
+					children = append(children, c)
+				}
+				rows.Close()
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				if len(children) == 0 {
+					continue
+				}
+				// restrict eine Ebene tiefer blockiert die Kaskade — wie nativ.
+				for _, gby := range by.referencedBy {
+					for _, gf := range gby.fields {
+						if gf.ref == by && gf.refOn == odRestrict {
+							for _, c := range children {
+								var one int
+								err := h.q().QueryRowContext(ctx, gf.restrictSQL, c).Scan(&one)
+								if err == nil {
+									return fmt.Errorf("%w: %s.%s", ErrReferenceInUse, gby.name, gf.name)
+								}
+								if err != sql.ErrNoRows {
+									return err
+								}
+							}
+						}
+					}
+				}
+				if err := d.emulateOnDelete(ctx, h, by, children); err != nil {
+					return err
+				}
+				if _, err := h.q().ExecContext(ctx, fmt.Sprintf(
+					"DELETE FROM %q WHERE %q IN (%s)", by.table, f.column, ph), idArgs...); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return nil
 }
 
-// SetGeo verlegt Heimatregion und Replikat-Liste eines GeoFlexible-
-// Datensatzes (engine-geführt, tenant-gescoped). Auf kollabierten Backends
-// (SQLite/Single-Region) sind das Platzierungs-Metadaten; die physische
-// Replikat-Verteilung folgt mit dem YB-Placement (Stufe 2).
+// SetGeo verlegt einen einzelnen Datensatz in eine andere Region
+// (engine-geführt, tenant-gescoped):
+//
+//   - GeoScoped: die Heimatregion, ohne Replikate — Replikat-Optionen
+//     lehnt der Aufruf ab, dafür ist GeoFlexible da.
+//   - GeoFlexible: Heimatregion und Replikat-Liste.
+//   - EventSourced: das ganze Aggregat — Event-Log, Archiv und
+//     Read-Model ziehen gemeinsam um, damit das Geo-Pinning stimmig
+//     bleibt.
+//
+// Auf partitionierten Backends wandern die Zeilen dabei physisch in die
+// Partition der Zielregion; auf kollabierten Backends bleibt es beim
+// Spaltenwert. GeoGlobal-Modelle sind per Definition überall — für sie
+// gibt es nichts zu verlegen.
 func (r *repo[T]) SetGeo(ctx context.Context, id ID, home string, opts ...GeoOption) error {
 	d := r.h.db()
 	if r.m == nil {
 		return fmt.Errorf("orm: Model %T ist nicht registriert", *new(T))
 	}
-	if r.m.kind == kindEventSourced {
-		return fmt.Errorf("orm: %s ist event-sourced — SetGeo gilt für CRUD-Modelle", r.m.name)
+	if r.m.opts.geoMode == geoGlobal {
+		return fmt.Errorf("orm: %s ist GeoGlobal — in allen Regionen vorhanden, SetGeo greift nicht", r.m.name)
 	}
-	if r.m.opts.geoMode != geoFlexible {
-		return fmt.Errorf("orm: %s ist nicht GeoFlexible — SetGeo braucht orm.GeoFlexible()", r.m.name)
+	if r.m.opts.geoMode != geoFlexible && len(opts) > 0 {
+		return fmt.Errorf("orm: %s ist nicht GeoFlexible — Replikate brauchen orm.GeoFlexible()", r.m.name)
 	}
 	var tenant ID
 	if r.m.tenanted() {
@@ -390,25 +613,63 @@ func (r *repo[T]) SetGeo(ctx context.Context, id ID, home string, opts ...GeoOpt
 	if !d.validGeo(home) {
 		return fmt.Errorf("%w: %q", ErrRegionNotActive, home)
 	}
-	g := geoScope{home: home}
-	for _, o := range opts {
-		o(&g)
+
+	sets := []string{`"geo" = ?`}
+	args := []any{home}
+	if r.m.opts.geoMode == geoFlexible {
+		g := geoScope{home: home}
+		for _, o := range opts {
+			o(&g)
+		}
+		reps, err := d.replicasJSON(g)
+		if err != nil {
+			return err
+		}
+		sets = append(sets, `"geo_replicas" = ?`)
+		args = append(args, reps)
 	}
-	reps, err := d.replicasJSON(g)
-	if err != nil {
-		return err
-	}
-	query := fmt.Sprintf("UPDATE %q SET geo = ?, geo_replicas = ? WHERE %q = ?", r.m.table, r.m.pk.column)
-	args := []any{home, reps, id.String()}
+
+	f := geoFilter{cond: fmt.Sprintf("%q = ?", r.m.pkColumn()), args: []any{id.String()}}
 	if r.m.tenanted() {
-		query += ` AND tenant_id = ?`
-		args = append(args, tenant.String())
+		f.cond += ` AND "tenant_id" = ?`
+		f.args = append(f.args, tenant.String())
 	}
-	res, err := r.h.q().ExecContext(ctx, query, args...)
+	// Beim Aggregat zuerst der Event-Log: er trägt die Heimatregion, an der
+	// das Geo-Pinning hängt. Der Filter greift dort auf aggregate_id.
+	// Ob das Aggregat existiert, entscheidet der Log — nicht das
+	// Read-Model, das der Projektion hinterherhinken darf.
+	if r.m.kind == kindEventSourced {
+		ef := geoFilter{cond: `"aggregate_id" = ?`, args: []any{id.String()}}
+		if r.m.tenanted() {
+			ef.cond += ` AND "tenant_id" = ?`
+			ef.args = append(ef.args, tenant.String())
+		}
+		var events int64
+		if err := r.h.q().QueryRowContext(ctx, fmt.Sprintf(
+			`SELECT (SELECT COUNT(*) FROM %q WHERE %s) + (SELECT COUNT(*) FROM %q WHERE %s)`,
+			esEventsTable(r.m), ef.cond, esArchiveTable(r.m), ef.cond),
+			append(append([]any{}, ef.args...), ef.args...)...).Scan(&events); err != nil {
+			return err
+		}
+		if events == 0 {
+			return ErrNotFound
+		}
+		if err := d.moveEvents(ctx, r.h, esEventsTable(r.m), ef, home); err != nil {
+			return err
+		}
+		for _, t := range []string{esArchiveTable(r.m), esSnapsTable(r.m)} {
+			if err := moveGeoColumn(ctx, r.h, t, ef, home); err != nil {
+				return err
+			}
+		}
+	}
+
+	res, err := r.h.q().ExecContext(ctx, fmt.Sprintf("UPDATE %q SET %s WHERE %s",
+		r.m.table, strings.Join(sets, ", "), f.cond), append(args, f.args...)...)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n, _ := res.RowsAffected(); n == 0 && r.m.kind != kindEventSourced {
 		return ErrNotFound
 	}
 	return nil
