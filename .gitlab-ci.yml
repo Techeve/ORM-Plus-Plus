@@ -87,10 +87,18 @@ test-yugabyte:
     # backend_test.go): ein offener TCP-Port ist kein Nachweis, YugabyteDB
     # nimmt ihn entgegen, bevor YSQL Verbindungen annimmt.
     #
-    # -parallel 8: die Tests sind unabhaengig (eigenes Schema je Test) und
-    # warten fast nur auf YB-Konsens — Nebenlaeufigkeit senkt die Wanduhr
-    # um ein Vielfaches, ohne Rechenlast zu erzeugen.
-    - go test -race -timeout 35m -parallel 8 ./...
+    # Bewusst -parallel 1. Die Tests sind unabhaengig (eigenes Schema je
+    # Test), und auf SQLite/PostgreSQL bringt Nebenlaeufigkeit das 2,5- bis
+    # 3-Fache. Ein YugabyteDB-EINZELKNOTEN traegt sie nicht:
+    #   - Tablets werden nach DROP SCHEMA nur asynchron freigegeben; die
+    #     Suite legt ueber 1200 kurzlebige Tabellen an und laeuft in das
+    #     vom Master durchgesetzte "safe system maximum" (543 Tablets).
+    #     Nachgemessen: bei -parallel 4 endete der Lauf auf exakt 543.
+    #   - Gleichzeitige DDL erzeugt Katalogfehler ("pg_attribute catalog is
+    #     missing", MISMATCHED_SCHEMA), die kein Retry sauber abfaengt.
+    # Ein echter Mehr-Knoten-Cluster hat beide Grenzen nicht — der
+    # Testcontainer ist hier der begrenzende Faktor, nicht die Bibliothek.
+    - go test -race -timeout 35m -parallel 1 ./...
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH
