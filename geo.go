@@ -56,7 +56,7 @@ func (d *DB) regionPlacements() []regionPlacement {
 			continue
 		}
 		at[r.name] = len(out)
-		out = append(out, regionPlacement{name: r.name, placement: r.placement})
+		out = append(out, regionPlacement(r))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out

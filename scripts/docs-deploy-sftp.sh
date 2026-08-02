@@ -117,6 +117,23 @@ if [ "$VERDAECHTIG" -ge 3 ]; then
 	exit 1
 fi
 
+# Vorabpruefung: darf das Konto im Zielverzeichnis ueberhaupt schreiben und
+# loeschen? Ohne sie erschiene ein Rechteproblem erst als hunderte Zeilen
+# "Access failed: Permission denied" mitten im Abgleich.
+PROBE=".ormpp-schreibprobe"
+: >"$PROBE"
+if ! lftp -c "$(verbindung) put -O \"$DOC_SFTP_PATH\" \"$PROBE\"; rm \"$DOC_SFTP_PATH/$PROBE\"" >/dev/null 2>&1; then
+	rm -f "$PROBE"
+	echo "FEHLER: '$DOC_SFTP_USER' darf in '$DOC_SFTP_PATH' nicht schreiben oder loeschen." >&2
+	echo >&2
+	echo "Haeufigste Ursache nach dem Wechsel von FTP auf SFTP: der Bestand" >&2
+	echo "gehoert noch dem alten FTP-Konto, das SFTP-Konto ist ein anderer" >&2
+	echo "Benutzer. Am Server einmalig uebereignen, etwa:" >&2
+	echo "  chown -R $DOC_SFTP_USER '$DOC_SFTP_PATH'" >&2
+	exit 1
+fi
+rm -f "$PROBE"
+
 # Jeder mirror-Aufruf muss auf EINER Zeile stehen: lftp trennt Befehle am
 # Zeilenumbruch, ein umbrochenes mirror wird als "mirror" ohne Argumente
 # gelesen und spiegelt dann das gesamte Arbeitsverzeichnis inklusive .git.
@@ -129,8 +146,45 @@ fi
 #                Server 404.
 # --delete       entfernt am Ziel, was lokal fehlt. Geschieht NACH den Uploads,
 #                es gibt also keinen Moment mit kaputten Verweisen.
+# --no-perms     ueberspringt das chmod nach jeder Uebertragung. Die Modi aus
+#                dem CI-Checkout sagen ueber den Webspace nichts aus, und ein
+#                Konto ohne chmod-Recht scheitert daran ohne Not.
+# spiegeln fuehrt einen mirror aus und laesst die Pipeline scheitern, wenn
+# auch nur eine Datei nicht durchkam.
+#
+# Bewusst NICHT `lftp ... | tee`: der Exit-Status einer Pipe ist der des
+# letzten Glieds, lftps Fehlschlag ginge verloren und der Job waere gruen,
+# obwohl die Doku unveraendert am Server liegt. Und lftp meldet Fehler
+# einzelner Dateien im mirror ohnehin nur im Text, nicht im Exit-Status --
+# deshalb zusaetzlich die Ausgabe pruefen.
+spiegeln() {
+	AUSGABE="$(mktemp)"
+	RC=0
+	lftp -c "$(verbindung) $1" >"$AUSGABE" 2>&1 || RC=$?
+	cat "$AUSGABE"
+
+	FEHLZEILEN="$(grep -c "Access failed\|Fatal error" "$AUSGABE" || true)"
+	if [ "$RC" -eq 0 ] && [ "$FEHLZEILEN" -eq 0 ]; then
+		rm -f "$AUSGABE"
+		return 0
+	fi
+	echo >&2
+	echo "FEHLER: Der Abgleich ist nicht vollstaendig durchgelaufen" >&2
+	echo "($FEHLZEILEN fehlgeschlagene Datei-Operationen, lftp-Status $RC)." >&2
+	if grep -q "Permission denied" "$AUSGABE"; then
+		echo >&2
+		echo "Das Zielverzeichnis ist beschreibbar (die Vorabpruefung lief durch)," >&2
+		echo "einzelne Dateien darin aber nicht — sie gehoeren einem anderen" >&2
+		echo "Benutzer, typischerweise dem alten FTP-Konto. Am Server einmalig" >&2
+		echo "uebereignen:" >&2
+		echo "  chown -R $DOC_SFTP_USER '$DOC_SFTP_PATH'" >&2
+	fi
+	rm -f "$AUSGABE"
+	exit 1
+}
+
 echo "Sync: $ZIEL/ -> sftp://$DOC_SFTP_HOST$DOC_SFTP_PATH"
-lftp -c "$(verbindung) mirror --reverse --delete --ignore-time --overwrite --parallel=4 --verbose $TROCKEN \"$ZIEL\" \"$DOC_SFTP_PATH\""
+spiegeln "mirror --reverse --delete --ignore-time --overwrite --no-perms --parallel=4 --verbose $TROCKEN \"$ZIEL\" \"$DOC_SFTP_PATH\""
 
 # Dateien mit stabilem Namen immer uebertragen. --ignore-time vergleicht nur die
 # Groesse; eine Aenderung, die die Byte-Groesse nicht veraendert (etwa
@@ -138,6 +192,6 @@ lftp -c "$(verbindung) mirror --reverse --delete --ignore-time --overwrite --par
 # Assets in _astro/ und pagefind/ sind davon nicht betroffen, weil Astro sie
 # nach Inhalts-Hash benennt: anderer Inhalt bedeutet dort anderer Dateiname.
 echo "Erzwinge Dateien mit stabilem Namen ..."
-lftp -c "$(verbindung) mirror --reverse --transfer-all --overwrite --parallel=4 --verbose $TROCKEN --include-glob=*.html --include-glob=*.xml --include-glob=*.json --include-glob=*.txt \"$ZIEL\" \"$DOC_SFTP_PATH\""
+spiegeln "mirror --reverse --transfer-all --overwrite --no-perms --parallel=4 --verbose $TROCKEN --include-glob=*.html --include-glob=*.xml --include-glob=*.json --include-glob=*.txt \"$ZIEL\" \"$DOC_SFTP_PATH\""
 
 echo "Sync abgeschlossen."

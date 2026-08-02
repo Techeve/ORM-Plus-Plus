@@ -64,9 +64,16 @@ test-postgres:
     - if: $CI_COMMIT_TAG
 
 # Identische Verhaltenssuite gegen YugabyteDB (YSQL).
+#
+# YugabyteDB ist deutlich langsamer als PostgreSQL — jede DDL laeuft ueber
+# den Konsens des Einzelknotens. Die Suite braucht hier ein Vielfaches der
+# Postgres-Laufzeit, deshalb ein eigener Job-Timeout und ein passender
+# -timeout fuer `go test` (dessen Default sind ebenfalls 10 Minuten, sonst
+# bricht die Suite von innen ab, bevor der Job-Timeout greift).
 test-yugabyte:
   stage: test
   image: golang:1.26
+  timeout: 40m
   <<: *go-cache
   services:
     - name: yugabytedb/yugabyte:2025.2.4.0-b122
@@ -78,7 +85,7 @@ test-yugabyte:
   script:
     # Warten, bis YSQL antwortet (yugabyted braucht nach dem Start etwas).
     - for i in $(seq 1 90); do (echo > /dev/tcp/yugabyte/5433) 2>/dev/null && break; sleep 2; done
-    - go test -race ./...
+    - go test -race -timeout 35m ./...
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH
