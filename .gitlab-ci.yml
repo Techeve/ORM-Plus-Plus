@@ -73,7 +73,11 @@ test-postgres:
 test-yugabyte:
   stage: test
   image: golang:1.26
-  timeout: 40m
+  # Unter der Runner-Obergrenze (30 min) bleiben, und -timeout darunter:
+  # laeuft die Suite fest, soll GO abbrechen und einen Goroutine-Dump
+  # hinterlassen. Schlaegt stattdessen der Runner zu, endet der Job
+  # wortlos — genau ohne die Diagnose, die man dann braucht.
+  timeout: 28m
   <<: *go-cache
   services:
     - name: yugabytedb/yugabyte:2025.2.4.0-b122
@@ -98,7 +102,7 @@ test-yugabyte:
     #     missing", MISMATCHED_SCHEMA), die kein Retry sauber abfaengt.
     # Ein echter Mehr-Knoten-Cluster hat beide Grenzen nicht — der
     # Testcontainer ist hier der begrenzende Faktor, nicht die Bibliothek.
-    - go test -race -timeout 35m -parallel 1 ./...
+    - go test -race -timeout 22m -parallel 1 ./...
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH
