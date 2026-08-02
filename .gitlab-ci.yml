@@ -130,19 +130,15 @@ docs-build:
     paths:
       - public
 
-# Auslieferung per SFTP statt per FTP: verschluesselter Transport, und der
-# ProFTPD am Ziel meldete in der PASV-Antwort eine falsche Adresse, worauf
-# lftp bis zum Job-Timeout haengen blieb.
+# Auslieferung per SFTP: verschluesselter Transport, und der ProFTPD am Ziel
+# meldete in der PASV-Antwort eine falsche Adresse, worauf lftp bis zum
+# Job-Timeout haengen blieb.
 #
-# `docs-deploy` aus dem Image kann nur FTP; das Image wird zentral gepflegt
-# und hier nicht angefasst. Deshalb der repo-eigene Weg ueber
-# scripts/docs-deploy-sftp.sh — verhaltensgleich zum Original (Abgleich statt
-# Voll-Upload, Schutz vor nicht eingesperrten Konten), nur anderer Transport.
-# Sobald das Builder-Image SFTP beherrscht, faellt beides hier weg.
-#
-# openssh-client/sshpass fehlen im Image: lftp spricht sftp:// ueber ein
-# externes ssh, und das Passwort kommt per sshpass -e aus der Umgebung
-# (nicht per -p, sonst stuende es in der Prozessliste des Runners).
+# `docs-deploy` im Builder-Image beherrscht SFTP inzwischen selbst und waehlt
+# die Betriebsart ueber DOC_SFTP_HOST (ohne stillen Rueckfall auf FTP). Die
+# repo-eigene Bruecke scripts/docs-deploy-sftp.sh ist damit ueberfluessig und
+# entfaellt — zwei Stellen mit demselben Verhalten laufen sonst auseinander,
+# und dahinter raeumt --delete auf.
 docs-deploy:
   stage: deploy
   image: registry.techeve.de/techeve/docs-builder:starlight-0.41.3
@@ -152,10 +148,8 @@ docs-deploy:
     - docs-build
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-  before_script:
-    - apk add --no-cache openssh-client sshpass
   script:
-    - ./scripts/docs-deploy-sftp.sh
+    - docs-deploy
 
 # Performance-Benchmark auf dem Runner (konstante Hardware) — MANUELL
 # startbar (Play-Button), blockiert die Pipeline nicht. Artefakte:
