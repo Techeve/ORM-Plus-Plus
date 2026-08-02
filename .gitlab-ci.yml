@@ -85,7 +85,10 @@ test-yugabyte:
   script:
     # Warten, bis YSQL antwortet (yugabyted braucht nach dem Start etwas).
     - for i in $(seq 1 90); do (echo > /dev/tcp/yugabyte/5433) 2>/dev/null && break; sleep 2; done
-    - go test -race -timeout 35m ./...
+    # -parallel 8: die Tests sind unabhaengig (eigenes Schema je Test) und
+    # warten fast nur auf YB-Konsens — Nebenlaeufigkeit senkt die Wanduhr
+    # um ein Vielfaches, ohne Rechenlast zu erzeugen.
+    - go test -race -timeout 35m -parallel 8 ./...
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH

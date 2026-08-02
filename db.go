@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 )
@@ -412,6 +413,58 @@ func (d *DB) Migrate(ctx context.Context, plans ...MigrationPlan) error {
 	return nil
 }
 
+// execDDL fuehrt eine Schema-Anweisung aus und wiederholt sie bei einem
+// voruebergehenden Konflikt.
+//
+// YugabyteDB serialisiert Katalogaenderungen ueber den Cluster: laeuft
+// anderswo gleichzeitig eine DDL, meldet der Server "Restart read
+// required" (SQLSTATE 40001). Das ist kein Fehler der Anweisung, sondern
+// die Aufforderung, sie zu wiederholen — YB erwartet das von jeder
+// Anwendung. Betroffen ist genau der Fall, den die Architektur vorsieht:
+// mehrere Instanzen rufen beim Rollout gleichzeitig Migrate.
+//
+// Meldet YB einen Fehlschlag, hat die DDL trotzdem gelegentlich
+// committet; der naechste Versuch laeuft dann in "already exists". Ab dem
+// zweiten Versuch gilt das deshalb als Erfolg — das Ziel ist erreicht.
+// Auf PostgreSQL und SQLite wird keiner der Zweige je betreten.
+func (d *DB) execDDL(ctx context.Context, stmt string) error {
+	var err error
+	for attempt := 0; attempt < 8; attempt++ {
+		if _, err = d.q().ExecContext(ctx, stmt); err == nil {
+			return nil
+		}
+		// "existiert bereits" bei einem CREATE ist der Zielzustand, nicht
+		// ein Fehler: YugabyteDB meldet unter gleichzeitiger DDL einen
+		// Fehlschlag, obwohl die Anweisung committet hat — der naechste
+		// Versuch (oder eine andere Instanz) trifft dann auf das fertige
+		// Objekt. applySchema legt ohnehin nur an, was es zuvor als
+		// fehlend gelesen hat.
+		if strings.HasPrefix(strings.TrimSpace(stmt), "CREATE") &&
+			strings.Contains(err.Error(), "already exists") {
+			return nil
+		}
+		if !isTransientConflict(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 50 * time.Millisecond):
+		}
+	}
+	return err
+}
+
+func isTransientConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "40001") ||
+		strings.Contains(msg, "Restart read required") ||
+		strings.Contains(msg, "could not serialize access")
+}
+
 func (d *DB) bootstrapSystemTables(ctx context.Context) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS ormpp_schema_state (
@@ -494,7 +547,7 @@ func (d *DB) bootstrapSystemTables(ctx context.Context) error {
 		)`,
 	}
 	for _, s := range stmts {
-		if _, err := d.q().ExecContext(ctx, s); err != nil {
+		if err := d.execDDL(ctx, s); err != nil {
 			return fmt.Errorf("orm: Systemtabellen anlegen: %w", err)
 		}
 	}
@@ -512,7 +565,7 @@ func (d *DB) bootstrapSystemTables(ctx context.Context) error {
 		"phase":          `ALTER TABLE ormpp_schema_state ADD COLUMN phase TEXT NOT NULL DEFAULT 'idle'`,
 	} {
 		if !have[col] {
-			if _, err := d.q().ExecContext(ctx, ddl); err != nil {
+			if err := d.execDDL(ctx, ddl); err != nil {
 				return fmt.Errorf("orm: ormpp_schema_state erweitern: %w", err)
 			}
 		}

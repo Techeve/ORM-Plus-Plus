@@ -35,6 +35,7 @@ type Account struct { // Model der neuen Generation (Schema v2)
 }
 
 func TestMigrationExpandContractTwoInstances(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	bg := context.Background()
 
@@ -141,6 +142,7 @@ func TestMigrationExpandContractTwoInstances(t *testing.T) {
 }
 
 func TestAdditiveDeprecatedLifecycle(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	bg := context.Background()
 	ctx := WithTenant(bg, SingleTenant)
@@ -245,6 +247,7 @@ func containsStr(list []string, s string) bool {
 }
 
 func TestBatchScriptCheckpointResume(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	bg := context.Background()
 
@@ -317,6 +320,7 @@ func TestBatchScriptCheckpointResume(t *testing.T) {
 }
 
 func TestLeasesAndInstanceRegister(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	bg := context.Background()
 
@@ -383,6 +387,7 @@ func TestLeasesAndInstanceRegister(t *testing.T) {
 }
 
 func TestFinalizeGuards(t *testing.T) {
+	t.Parallel()
 	db, _ := testDB(t)
 	bg := context.Background()
 
@@ -404,6 +409,7 @@ func TestFinalizeGuards(t *testing.T) {
 // TestDecodeJSONHealsLegacyEmptyCell — ”-Zellen kann es nur auf SQLite
 // geben (TEXT-Spalte); JSONB auf PG/YB lehnt ” physisch ab.
 func TestAlterAddedJSONColumnReadsAsZero(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	bg := context.Background()
 	ctx := WithTenant(bg, SingleTenant)
@@ -475,6 +481,7 @@ func TestAlterAddedJSONColumnReadsAsZero(t *testing.T) {
 // der Zustand dort nicht verhaltensgleich provozieren; der Dekodier-Pfad
 // selbst ist backend-frei und damit überall identisch.
 func TestDecodeJSONHealsLegacyEmptyCell(t *testing.T) {
+	t.Parallel()
 	f := &field{column: "tags", dk: dJSON}
 
 	for name, raw := range map[string]any{
@@ -524,6 +531,7 @@ type Catalog struct { // neues TenantFree-Model (v2)
 }
 
 func TestReplaceModelTenantFree(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	bg := context.Background()
 

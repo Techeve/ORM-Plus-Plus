@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestStore liefert eine Treiber-Fabrik: Jeder Aufruf verbindet mit
@@ -43,7 +44,17 @@ func newTestStore(t *testing.T) func() Driver {
 		if err != nil {
 			t.Fatalf("Admin-Verbindung: %v", err)
 		}
-		if _, err := admin.Exec(fmt.Sprintf("CREATE SCHEMA %q", schema)); err != nil {
+		// Wie in der Engine (execDDL): YugabyteDB serialisiert
+		// Katalogaenderungen und meldet bei gleichzeitiger DDL
+		// "Restart read required" (40001) — wiederholen, nicht scheitern.
+		// Parallel laufende Tests treffen das sonst regelmaessig.
+		for attempt := 0; attempt < 8; attempt++ {
+			if _, err = admin.Exec(fmt.Sprintf("CREATE SCHEMA %q", schema)); err == nil || !isTransientConflict(err) {
+				break
+			}
+			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+		}
+		if err != nil {
 			t.Fatalf("Schema anlegen: %v", err)
 		}
 		t.Cleanup(func() {

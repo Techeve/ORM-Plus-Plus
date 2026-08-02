@@ -63,6 +63,7 @@ func esTestDB(t *testing.T, opts ...ModelOption) (*DB, context.Context) {
 }
 
 func TestAppendLoadRoundtrip(t *testing.T) {
+	t.Parallel()
 	db, ctx := esTestDB(t)
 
 	tk := New[Ticket](db)
@@ -109,6 +110,7 @@ func TestAppendLoadRoundtrip(t *testing.T) {
 }
 
 func TestAppendVersionConflict(t *testing.T) {
+	t.Parallel()
 	db, ctx := esTestDB(t)
 
 	tk := New[Ticket](db)
@@ -137,6 +139,7 @@ func TestAppendVersionConflict(t *testing.T) {
 }
 
 func TestProjectionQueryAndWaitFor(t *testing.T) {
+	t.Parallel()
 	db, ctx := esTestDB(t)
 	if err := db.StartWorkers(context.Background()); err != nil {
 		t.Fatalf("StartWorkers: %v", err)
@@ -184,6 +187,7 @@ func TestProjectionQueryAndWaitFor(t *testing.T) {
 }
 
 func TestProjectionTenantIsolation(t *testing.T) {
+	t.Parallel()
 	db, ctx := esTestDB(t)
 
 	other, _ := db.Tenants().Create(ctx, TenantInfo{Name: "B"})
@@ -211,6 +215,7 @@ func TestProjectionTenantIsolation(t *testing.T) {
 }
 
 func TestSnapshotsCreatedUsedAndPruned(t *testing.T) {
+	t.Parallel()
 	db, ctx := esTestDB(t, ticketEvents(), SnapshotEvery(5), SnapshotKeepLast(2))
 
 	tk := New[Ticket](db)
@@ -267,6 +272,7 @@ func TestSnapshotsCreatedUsedAndPruned(t *testing.T) {
 }
 
 func TestHistoryAtVersionAtTime(t *testing.T) {
+	t.Parallel()
 	db, ctx := esTestDB(t)
 
 	tk := New[Ticket](db)
@@ -315,6 +321,7 @@ func TestHistoryAtVersionAtTime(t *testing.T) {
 }
 
 func TestOnEventReactorAndRebuildView(t *testing.T) {
+	t.Parallel()
 	db, ctx := esTestDB(t)
 
 	var mu sync.Mutex
@@ -355,6 +362,7 @@ func TestOnEventReactorAndRebuildView(t *testing.T) {
 }
 
 func TestRebuildProjection(t *testing.T) {
+	t.Parallel()
 	db, ctx := esTestDB(t)
 
 	tk := New[Ticket](db)
@@ -381,6 +389,7 @@ func TestRebuildProjection(t *testing.T) {
 }
 
 func TestStreamAndWatch(t *testing.T) {
+	t.Parallel()
 	db, ctx := esTestDB(t)
 
 	tk := New[Ticket](db)
@@ -440,6 +449,7 @@ func TestStreamAndWatch(t *testing.T) {
 type NoteAddedV1 struct{ Text string }
 
 func TestUpcasterChainAndValidation(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	bg := context.Background()
 
@@ -518,6 +528,7 @@ func TestUpcasterChainAndValidation(t *testing.T) {
 }
 
 func TestESRegistrationValidation(t *testing.T) {
+	t.Parallel()
 	bg := context.Background()
 
 	// Ohne Aggregate-Einbettung.
@@ -547,6 +558,7 @@ func TestESRegistrationValidation(t *testing.T) {
 }
 
 func TestAppendInTransaction(t *testing.T) {
+	t.Parallel()
 	db, ctx := esTestDB(t)
 
 	// Append in einer Transaktion — Rollback nimmt die Events zurück.
@@ -572,6 +584,7 @@ func TestAppendInTransaction(t *testing.T) {
 // --- Phase 4b: Archivierung, Geo-Pinning, Worker-Leases ---
 
 func TestArchiverMovesOldEventsTransparently(t *testing.T) {
+	t.Parallel()
 	db, ctx := esTestDB(t, ticketEvents(), SnapshotEvery(6), SnapshotKeepLast(2))
 	bg := context.Background()
 
@@ -647,6 +660,7 @@ func TestArchiverMovesOldEventsTransparently(t *testing.T) {
 }
 
 func TestAggregateGeoPinning(t *testing.T) {
+	t.Parallel()
 	db, err := Open(newTestStore(t)())
 	if err != nil {
 		t.Fatal(err)
@@ -683,6 +697,7 @@ func TestAggregateGeoPinning(t *testing.T) {
 }
 
 func TestWorkerLeaseCoordination(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	bg := context.Background()
 	open := func() *DB {

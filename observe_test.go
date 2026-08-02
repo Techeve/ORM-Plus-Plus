@@ -9,6 +9,7 @@ import (
 )
 
 func TestMigrationStatusLifecycle(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	bg := context.Background()
 
@@ -64,6 +65,7 @@ func TestMigrationStatusLifecycle(t *testing.T) {
 }
 
 func TestHealthInstancesLagAndRegions(t *testing.T) {
+	t.Parallel()
 	db, ctx := esTestDB(t)
 	bg := context.Background()
 
@@ -112,6 +114,7 @@ func TestHealthInstancesLagAndRegions(t *testing.T) {
 }
 
 func TestSetGeoFlexible(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	bg := context.Background()
 

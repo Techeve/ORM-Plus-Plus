@@ -46,6 +46,7 @@ type Note struct {
 // DEFAULT-Partition. Danach werden Regionen deklariert — Migrate muss die
 // Partitionen nachlegen UND die liegengebliebenen Zeilen mitnehmen.
 func TestGeoPartitionenWerdenNachgezogen(t *testing.T) {
+	t.Parallel()
 	bg := context.Background()
 	store := newTestStore(t)
 
@@ -118,6 +119,7 @@ func TestGeoPartitionenWerdenNachgezogen(t *testing.T) {
 // CRUD-Zeilen, Read-Model und Event-Log wandern mit, das Aggregat bleibt
 // vollständig und die Geo-Sequenz der Zielregion bleibt kollisionsfrei.
 func TestMoveTenant(t *testing.T) {
+	t.Parallel()
 	bg := context.Background()
 	db, _ := geoTestDB(t, newTestStore(t), Region("eu-central"), Region("na"))
 
@@ -249,6 +251,7 @@ func TestMoveTenant(t *testing.T) {
 // event-sourced Model den ganzen Event-Log mit — sonst risse das
 // Geo-Pinning.
 func TestSetGeoAggregat(t *testing.T) {
+	t.Parallel()
 	bg := context.Background()
 	db, ctx := geoTestDB(t, newTestStore(t), Region("eu-central"), Region("na"))
 
@@ -319,6 +322,7 @@ func TestSetGeoAggregat(t *testing.T) {
 // Schreibverbindung) ein Deadlock und anderswo ein Schreibzugriff am
 // Aufrufer vorbei — der Rollback unten würde ihn nicht zurücknehmen.
 func TestSetGeoInTransaktion(t *testing.T) {
+	t.Parallel()
 	bg := context.Background()
 	db, ctx := geoTestDB(t, newTestStore(t), Region("eu-central"), Region("na"))
 
@@ -352,6 +356,7 @@ func TestSetGeoInTransaktion(t *testing.T) {
 // deklariertes Placement, das es nicht gibt, muss Migrate stoppen statt
 // stillschweigend ohne physische Wirkung durchzulaufen.
 func TestPlacementMussExistieren(t *testing.T) {
+	t.Parallel()
 	db, err := Open(newTestStore(t)())
 	if err != nil {
 		t.Fatal(err)
@@ -379,6 +384,7 @@ func TestPlacementMussExistieren(t *testing.T) {
 // TestRemoveRegion: eine Region verschwindet nicht stillschweigend,
 // solange sie Daten hält.
 func TestRemoveRegion(t *testing.T) {
+	t.Parallel()
 	bg := context.Background()
 	store := newTestStore(t)
 	db, ctx := geoTestDB(t, store, Region("eu-central"), Region("na"))
@@ -440,6 +446,7 @@ func TestRemoveRegion(t *testing.T) {
 //
 // Aufbau des Clusters und der Tablespaces: docker-compose.geo.yml.
 func TestGeoResidenzPhysisch(t *testing.T) {
+	t.Parallel()
 	spec := os.Getenv("ORMPP_TEST_PLACEMENTS")
 	if spec == "" {
 		t.Skip("ORMPP_TEST_PLACEMENTS nicht gesetzt — braucht einen Cluster mit mehreren Platzierungen")
@@ -587,6 +594,7 @@ func geoCRUDTestDB(t *testing.T, store func() Driver, regions ...RegionDecl) (*D
 // Partition ihrer Region, und die Constraint-Semantik (unique, ref,
 // ondelete) bleibt über Partitionsgrenzen hinweg identisch zu vorher.
 func TestCRUDGeoPartitioniert(t *testing.T) {
+	t.Parallel()
 	bg := context.Background()
 	db, ctx := geoCRUDTestDB(t, newTestStore(t), Region("eu-central"), Region("na"))
 	eu, na := WithGeo(ctx, "eu-central"), WithGeo(ctx, "na")
@@ -672,6 +680,7 @@ func TestCRUDGeoPartitioniert(t *testing.T) {
 // seiner neuen Region — ein ON CONFLICT träfe nur das Context-Geo und
 // legte ihn doppelt an.
 func TestUpsertNachUmzug(t *testing.T) {
+	t.Parallel()
 	bg := context.Background()
 	db, ctx := geoCRUDTestDB(t, newTestStore(t), Region("eu-central"), Region("na"))
 	eu := WithGeo(ctx, "eu-central")
@@ -708,6 +717,7 @@ func TestUpsertNachUmzug(t *testing.T) {
 // Migrate überführt sie in die partitionierte Form — ohne Datenverlust,
 // mit intakter Constraint-Semantik und wiederhergestellter Snapshot-Geo.
 func TestBestandsUmbau(t *testing.T) {
+	t.Parallel()
 	bg := context.Background()
 	store := newTestStore(t)
 
@@ -793,6 +803,7 @@ func TestBestandsUmbau(t *testing.T) {
 // TestSnapshotResidiertBeimAggregat: der Snapshot ist derselbe Zustand wie
 // das Read-Model und trägt dessen Region — auch nach einem Umzug.
 func TestSnapshotResidiertBeimAggregat(t *testing.T) {
+	t.Parallel()
 	bg := context.Background()
 	db, ctx := geoTestDB(t, newTestStore(t), Region("eu-central"), Region("na"))
 

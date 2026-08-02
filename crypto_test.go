@@ -55,6 +55,7 @@ func cryptoDB(t *testing.T, store func() Driver, p KeyProvider) (*DB, context.Co
 }
 
 func TestEncryptionRoundtripAndOpacity(t *testing.T) {
+	t.Parallel()
 	db, ctx := cryptoDB(t, newTestStore(t), StaticKey(testKey(1)))
 	defer db.Close()
 
@@ -100,6 +101,7 @@ func TestEncryptionRoundtripAndOpacity(t *testing.T) {
 }
 
 func TestEncryptedNotFilterable(t *testing.T) {
+	t.Parallel()
 	db, ctx := cryptoDB(t, newTestStore(t), StaticKey(testKey(1)))
 	defer db.Close()
 
@@ -112,6 +114,7 @@ func TestEncryptedNotFilterable(t *testing.T) {
 }
 
 func TestEncryptionRequiresProvider(t *testing.T) {
+	t.Parallel()
 	db, err := Open(newTestStore(t)())
 	if err != nil {
 		t.Fatal(err)
@@ -124,6 +127,7 @@ func TestEncryptionRequiresProvider(t *testing.T) {
 }
 
 func TestEncryptionKeyRotation(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	// Generation 1 schreibt mit k1.
@@ -171,6 +175,7 @@ type SecretTicket struct {
 func (s *SecretTicket) Apply(e Event) error { return nil }
 
 func TestEncryptedOnEventSourcedRejected(t *testing.T) {
+	t.Parallel()
 	db, err := Open(newTestStore(t)(), Encryption(StaticKey(testKey(1))))
 	if err != nil {
 		t.Fatal(err)
@@ -184,6 +189,7 @@ func TestEncryptedOnEventSourcedRejected(t *testing.T) {
 }
 
 func TestTenantExport(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	db, err := Open(store(), Encryption(StaticKey(testKey(1))))
 	if err != nil {
@@ -263,6 +269,7 @@ func TestTenantExport(t *testing.T) {
 }
 
 func TestTenantPurge(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	db, err := Open(store(), Encryption(StaticKey(testKey(1))))
 	if err != nil {

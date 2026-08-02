@@ -171,7 +171,7 @@ func (d *DB) rebuildPartitioned(ctx context.Context, spec geoTableSpec) error {
 			return err
 		}
 		for _, fk := range fks {
-			if _, err := d.q().ExecContext(ctx, fmt.Sprintf(
+			if err := d.execDDL(ctx, fmt.Sprintf(
 				`ALTER TABLE %q DROP CONSTRAINT IF EXISTS %q`, fk[0], fk[1])); err != nil {
 				return err
 			}
@@ -185,12 +185,12 @@ func (d *DB) rebuildPartitioned(ctx context.Context, spec geoTableSpec) error {
 			if strings.HasSuffix(ix, "_vorgeo") {
 				continue
 			}
-			if _, err := d.q().ExecContext(ctx, fmt.Sprintf(
+			if err := d.execDDL(ctx, fmt.Sprintf(
 				`ALTER INDEX %q RENAME TO %q`, ix, ix+"_vorgeo")); err != nil {
 				return err
 			}
 		}
-		if _, err := d.q().ExecContext(ctx, fmt.Sprintf(
+		if err := d.execDDL(ctx, fmt.Sprintf(
 			`ALTER TABLE %q RENAME TO %q`, spec.table, old)); err != nil {
 			return err
 		}
@@ -198,7 +198,7 @@ func (d *DB) rebuildPartitioned(ctx context.Context, spec geoTableSpec) error {
 	}
 	if curKind == 0 {
 		for _, stmt := range spec.create() {
-			if _, err := d.q().ExecContext(ctx, stmt); err != nil {
+			if err := d.execDDL(ctx, stmt); err != nil {
 				return fmt.Errorf("%w (%s)", err, strings.Join(strings.Fields(stmt), " "))
 			}
 		}
@@ -332,7 +332,7 @@ func (d *DB) createGeoPartition(ctx context.Context, table string, key []string,
 		stmts = d.dial.adoptRegionSQL(table, key, r)
 	}
 	for _, s := range stmts {
-		if _, err := d.q().ExecContext(ctx, s); err != nil {
+		if err := d.execDDL(ctx, s); err != nil {
 			return fmt.Errorf("%w (%s)", err, strings.Join(strings.Fields(s), " "))
 		}
 	}

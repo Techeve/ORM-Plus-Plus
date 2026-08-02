@@ -22,7 +22,7 @@ func (d *DB) applySchema(ctx context.Context) error {
 		}
 		if len(existing) == 0 {
 			for _, stmt := range createTableSQL(d, m) {
-				if _, err := d.q().ExecContext(ctx, stmt); err != nil {
+				if err := d.execDDL(ctx, stmt); err != nil {
 					return fmt.Errorf("orm: %s anlegen: %w (%s)", m.table, err, stmt)
 				}
 			}
@@ -38,7 +38,7 @@ func (d *DB) applySchema(ctx context.Context) error {
 						ddl = esColumnDDL(d.dial, f)
 					}
 					stmt := fmt.Sprintf("ALTER TABLE %q ADD COLUMN %s", m.table, ddl)
-					if _, err := d.q().ExecContext(ctx, stmt); err != nil {
+					if err := d.execDDL(ctx, stmt); err != nil {
 						return fmt.Errorf("orm: Spalte %s.%s ergänzen: %w", m.table, f.column, err)
 					}
 				}
@@ -71,7 +71,7 @@ func (d *DB) ensureESTables(ctx context.Context, m *model) error {
 			continue
 		}
 		for _, stmt := range stmts {
-			if _, err := d.q().ExecContext(ctx, stmt); err != nil {
+			if err := d.execDDL(ctx, stmt); err != nil {
 				return fmt.Errorf("orm: %s anlegen: %w (%s)", table, err, stmt)
 			}
 		}
@@ -106,7 +106,7 @@ func (d *DB) ensureSnapshotGeo(ctx context.Context, m *model) error {
 			sn, esEventsTable(m), sn),
 	}
 	for _, s := range stmts {
-		if _, err := d.q().ExecContext(ctx, s); err != nil {
+		if err := d.execDDL(ctx, s); err != nil {
 			return fmt.Errorf("orm: %s um geo ergänzen: %w", sn, err)
 		}
 	}
