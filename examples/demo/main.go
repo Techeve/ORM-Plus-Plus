@@ -502,6 +502,17 @@ func generation1(pfad string, schluessel []byte) {
 	fmt.Printf("• Export: %d JSON-Zeilen (Tenant, Zeilen, Events, Snapshots)\n",
 		strings.Count(auszug.String(), "\n"))
 
+	// Import: derselbe Strom zurück — aus der Auskunft wird eine Sicherung.
+	// Ersetzen statt Mischen: archivieren, dann zurückspielen. Geheimnisse
+	// werden mit dem AKTUELLEN Schlüssel neu verschlüsselt, und es gilt die
+	// Heimatregion des Ziels, nicht die des Exports (der Mandant ist oben
+	// nach us-east umgezogen).
+	must(db.Tenants().Archive(bg, kunde.ID))
+	must(db.Tenants().Import(orm.WithGeo(bg, "us-east"), kunde.ID, &auszug))
+	zurueck, err := orm.Query[Betreiber](db, orm.WithTenant(bg, kunde.ID)).All()
+	must(err)
+	fmt.Printf("• Import: Sicherung zurückgespielt (%d Betreiber, Read-Model neu projiziert)\n", len(zurueck))
+
 	// Purge: Recht auf Vergessenwerden — physisches Löschen über ALLE
 	// Tabellen/Events/Snapshots/Archive. Zweistufig: erst archivieren
 	// (blockiert neue Schreibvorgänge), dann purgen. Auditiert.

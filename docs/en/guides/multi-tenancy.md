@@ -54,4 +54,35 @@ err = tenants.Export(ctx, id, w)
 err = tenants.Purge(ctx, id)
 ```
 
+## Backup: import
+
+`Export` on its own is a data subject access request. Together with `Import`
+it is a backup: last night's stream turns tenant X back into tenant X.
+
+```go
+// Replace, don't merge: the target must be empty or archived.
+err = tenants.Archive(ctx, id)
+err = tenants.Import(orm.WithGeo(ctx, "eu-central"), id, r)
+```
+
+What you can rely on:
+
+- **No silent half state.** During the import the tenant sits at
+  `importing` and every write fails with `ErrImportIncomplete`. If the
+  import aborts, that status stays — the tenant is visibly incomplete
+  rather than quietly half filled. Running the import again discards the
+  remains and reaches the correct end state.
+- **Truncated streams are caught.** The export ends with a terminator
+  line; without it the import refuses.
+- **Secrets are re-encrypted** with the target database's current key,
+  which makes an import the path for a key rotation as a side effect.
+- **The present wins for geo.** The target's home region applies, not the
+  export's; with several regions `orm.WithGeo` is mandatory. Otherwise
+  every restore would scatter the data across regions again.
+- **Writing continues seamlessly.** Events land at the end of the target
+  region's geo sequence; read models are re-projected from them.
+- **Foreign schema states are rejected**, never silently applied
+  (`ErrExportSchemaMismatch`) — allow deliberately with
+  `orm.AllowSchemaDrift()`.
+
 See also [Geo-partitioning](/en/guides/geo/).

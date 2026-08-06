@@ -18,6 +18,10 @@ Alle Fehler sind mit `errors.Is` prüfbare Sentinel-Werte.
 | `orm.ErrInvalidValue` | Wert außerhalb der enum-Wertemenge |
 | `orm.ErrRequiresTx` | Operation (z. B. GetForUpdate) außerhalb einer Transaktion |
 | `orm.ErrTenantNotArchived` | Purge auf einen nicht archivierten Tenant |
+| `orm.ErrTenantNotEmpty` | `Import` in einen aktiven Tenant, der noch Daten hält |
+| `orm.ErrImportIncomplete` | Tenant aus einem abgebrochenen Import; Strom ohne Schlusszeile |
+| `orm.ErrExportSchemaMismatch` | Export von einem anderen Schemastand (ohne `AllowSchemaDrift`) |
+| `orm.ErrUnknownEventType` | Event im Strom, dessen Typ hier nicht deklariert ist |
 | `orm.ErrNoGeo` | Mehr-Regionen-Topologie, aber kein Daten-Geo im Context |
 | `orm.ErrRegionNotActive` | Daten-Geo zeigt auf bootstrapping/draining/unbekannte Region |
 | `orm.ErrVersionConflict` | Optimistisches Locking: CRUD-version oder Aggregat-Version veraltet |
