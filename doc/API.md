@@ -102,25 +102,60 @@ Die Topologie beschreibt, **welche Regionen der Cluster hat**. Sie ist Cluster-Z
 func Topology(db *DB, regions ...RegionDecl)
 func Region(name string, opts ...RegionOption) RegionDecl
 
-orm.Placement(cloudPlacement string)   // YB: Tablespace-/Placement-Zuordnung
+orm.Placement(tablespace string)   // PG/YB: Name eines VORHANDENEN Tablespace
+
+func (db *DB) RemoveRegion(ctx context.Context, name string) error
 ```
 
 **Beispiel:**
 
 ```go
 orm.Topology(db,
-    orm.Region("eu-central", orm.Placement("cloud1.eu-central-1")),
-    orm.Region("us-east",    orm.Placement("cloud1.us-east-1")),
-    orm.Region("ap-south",   orm.Placement("cloud1.ap-south-1")),
+    orm.Region("eu-central",   orm.Placement("ts_eu_central")),
+    orm.Region("eu-southwest", orm.Placement("ts_eu_southwest")),
+    orm.Region("na",           orm.Placement("ts_na")),
 )
 ```
 
 **Regeln:**
 
 - Keine `Topology`-Deklaration ⇒ implizite Region `local`. Der einfachste Fall braucht null Geo-Code.
-- **Region hinzufügen** = zusätzliche `orm.Region(...)`-Zeile + Rollout. Additiv, kein Sondermodus. Die neue Region durchläuft den Lebenszyklus `bootstrapping → active`; während `bootstrapping` werden `GeoGlobal`-Modelle und `ReplicateAll`-Datensätze nachrepliziert, Schreiben in die Region ist bis `active` fail-closed gesperrt.
-- **Region entfernen** = Status `draining` setzen (Betriebsaktion, Stufe 2 auch per API): keine neuen Daten; Datensätze mit *Heimat* in der Region ziehen per geo-verteiltem Backfill um; Replikate werden verworfen; erst dann `removed`.
+- **Region hinzufügen** = zusätzliche `orm.Region(...)`-Zeile + Rollout. Additiv, kein Sondermodus. `Migrate` gleicht die Partitionen bei **jedem** Lauf gegen die Topologie ab — auch wenn die Schema-Version gleich bleibt. Zeilen der neuen Region, die bis dahin in der DEFAULT-Partition lagen, ziehen dabei mit um.
+- **Region entfernen** = aus der Deklaration nehmen, ausrollen, dann `db.RemoveRegion(ctx, name)`. Hält die Region noch Daten, schlägt der Aufruf mit `ErrRegionHasData` fehl und nennt die betroffenen Tabellen — umziehen ist Sache von `MoveTenant`/`SetGeo`. Ein bloßes Weglassen aus `Topology` entfernt nichts: alte Instanzen im Rollout dürfen die Region noch kennen.
 - Auf SQLite/Single-Region-Postgres kollabieren alle Regionen auf eine — die Deklaration bleibt gültig (Grundprinzip).
+
+**Geo-Partitionierung ist Kernfähigkeit — sie gilt für alle Tabellen:**
+
+Sobald eine Topologie deklariert ist, sind auf PG/YB **sämtliche** Tabellen eines Nicht-GeoGlobal-Models nach `geo` LIST-partitioniert: CRUD-Tabellen, ES-Read-Models, Event-Logs, Archive und Snapshots. Der Primärschlüssel enthält physisch den Partitionsschlüssel (`(pk, geo)` bzw. `(aggregate_id, aggregate_seq, geo)`); die API ändert sich dadurch nicht — Reads filtern weiterhin nie auf Geo, `Get`/`Update`/`Delete` per ID finden den Datensatz in jeder Region. Bestehende Installationen mit unpartitionierten Tabellen überführt `Migrate` selbsttätig (stepwise, wiederaufnehmbar; während des Umbaus existiert vorübergehend `<tabelle>_vorgeo` — den Umbau in eine ruhige Phase legen). GeoGlobal-Modelle bleiben unpartitioniert: sie sind per Definition in allen Regionen.
+
+Weil ein Unique auf einer partitionierten Tabelle den Partitionsschlüssel enthalten muss, sind zwei Dinge nicht mehr nativ darstellbar und wandern in die Engine — **topologie-, nicht backend-gebunden**, damit SQLite sich identisch verhält:
+
+- **FKs auf partitionierte Ziele** entfallen in der DDL. Die Engine prüft weiter: Referenzziel bei jedem Schreiben (`ErrInvalidReference`), restrict vor dem Löschen (`ErrReferenceInUse`), `ondelete=setnull/cascade` als Emulation in der Lösch-Transaktion (rekursiv, restrict-Schutz auf jeder Ebene). FKs, die möglich bleiben (auf `ormpp_tenants`, auf GeoGlobal-Ziele), bleiben in der DDL.
+- **Unique-Constraints** gelten physisch pro Geo; die tenant-globale Eindeutigkeit prüft die Engine vor jedem Insert/Update/Upsert und meldet `ErrUniqueConflict`. Der Restfall zweier zeitgleicher Inserts in verschiedenen Regionen ist über Partitionsgrenzen nicht constraint-durchsetzbar (dieselbe dokumentierte Grenze wie beim ES-Geo-Pinning).
+
+`Upsert` läuft auf Geo-Modellen zweistufig (UPDATE nach pk über alle Regionen, sonst INSERT) — ein natives `ON CONFLICT` träfe nur das Context-Geo und legte einen umgezogenen Datensatz doppelt an.
+
+**Placement — physische Residenz:**
+
+`orm.Placement("ts_eu_central")` benennt einen **vorhandenen** Tablespace. ORM++ legt keine Tablespaces an: Replikatzahl und Placement-Blöcke sind eine Betriebsentscheidung, keine ORM-Entscheidung. Existiert der Tablespace nicht, bricht `Migrate` mit `ErrPlacementNotFound` ab, bevor irgendeine DDL läuft.
+
+```sql
+-- Betriebsaufgabe, einmal je Region (YugabyteDB):
+CREATE TABLESPACE ts_eu_central WITH (replica_placement='{
+  "num_replicas": 3,
+  "placement_blocks": [
+    {"cloud":"cloud1","region":"eu-central","zone":"eu-central-1a","min_num_replicas":3}
+  ]}');
+```
+
+Die Bindung passiert ausschließlich beim `CREATE TABLE` der Partition:
+
+```sql
+CREATE TABLE "zone_events_geo_eu-central" PARTITION OF "zone_events"
+  FOR VALUES IN ('eu-central') TABLESPACE "ts_eu_central";
+```
+
+`ALTER TABLE … SET TABLESPACE` ist **kein Ersatz** und wird von ORM++ nicht verwendet: YugabyteDB meldet „data movement successfully initiated“ und schreibt `reltablespace` um, bewegt die Tablets ohne `ysql_beta_feature_tablespace_alteration` aber nicht — der Katalog behauptete dann eine Platzierung, die es nicht gibt. Liegt eine bestehende Partition deshalb nicht im deklarierten Tablespace, meldet `Migrate` das mit `ErrPlacementMismatch`, statt eine Umbindung vorzutäuschen. Eine echte Neubindung heißt `DETACH` → Neuanlage mit Tablespace → Kopie → `ATTACH` und bleibt eine bewusste Betriebsaktion.
 
 ---
 
@@ -361,7 +396,7 @@ type Repository[T any] interface {
     Update(ctx context.Context, entity *T) error          // ErrVersionConflict bei `version`-Tag
     Upsert(ctx context.Context, entity *T) error
     Delete(ctx context.Context, id orm.ID) error
-    SetGeo(ctx context.Context, id orm.ID, home string, opts ...GeoOption) error  // nur GeoFlexible
+    SetGeo(ctx context.Context, id orm.ID, home string, opts ...GeoOption) error  // Umzug; opts nur GeoFlexible
     Query(ctx context.Context) QueryBuilder[T]
 }
 ```
@@ -394,6 +429,30 @@ err = groups.SetGeo(ctx, g.ID, "us-east", orm.ReplicateTo("eu-central"))
 ```
 
 Lesen ist **lokal-bevorzugt**: Existiert in der Region der lesenden Instanz eine Kopie, kommt sie von dort; sonst antwortet die Heimatregion.
+
+### 6.1.1 Umzug in eine andere Region
+
+`SetGeo` verlegt **einen** Datensatz, `MoveTenant` einen ganzen Mandanten über alle Modelle:
+
+```go
+func (db *DB) MoveTenant(ctx context.Context, tenant orm.ID, toRegion string) error
+```
+
+```go
+// Eine Organisation zieht nach Nordamerika um — alle Modelle auf einmal:
+err := db.MoveTenant(ctx, tenant, "na")
+
+// Oder gezielt ein Datensatz bzw. ein Aggregat:
+err = orm.Repo[Zone](db).SetGeo(ctx, zoneID, "na")
+```
+
+**Regeln:**
+
+- `SetGeo` gilt für **alle** Geo-Modi außer `GeoGlobal` (das ist per Definition überall). Replikat-Optionen (`ReplicateTo`/`ReplicateAll`) bleiben `GeoFlexible` vorbehalten; auf `GeoScoped` sind sie ein Fehler.
+- Auf **event-sourced** Modellen zieht `SetGeo` das ganze Aggregat um: Event-Log, Archiv und Read-Model gemeinsam — sonst risse das Geo-Pinning. Ob das Aggregat existiert, entscheidet der Event-Log, nicht das (womöglich hinterherhinkende) Read-Model.
+- Auf partitionierten Backends wandern die Zeilen dabei **physisch** in die Partition der Zielregion. Auf kollabierten Backends bleibt es beim Spaltenwert — dieselbe API, dasselbe beobachtbare Verhalten.
+- Die Geo-Sequenz (`seq`) ist pro Region monoton. Umgezogene Events bekommen deshalb neue `seq`-Werte am Ende der Zielregion; Projektionen dort sehen sie als Nachzügler und wenden sie erneut an (at-least-once, idempotent).
+- `MoveTenant` läuft batchweise und ist **idempotent**: nach einem Abbruch setzt ein erneuter Aufruf ihn fort. `GeoGlobal`- und `TenantFree`-Modelle bleiben unberührt.
 
 ### 6.2 Query-Builder
 
@@ -800,6 +859,10 @@ Alle Fehler sind mit `errors.Is` prüfbare Sentinel-Werte:
 | `orm.ErrTenantNotArchived` | `Purge` auf einen nicht archivierten Tenant |
 | `orm.ErrNoGeo` | Mehr-Regionen-Topologie, aber kein Daten-Geo im Context |
 | `orm.ErrRegionNotActive` | Daten-Geo zeigt auf `bootstrapping`/`draining`/unbekannte Region |
+| `orm.ErrPlacementNotFound` | `Placement(...)` benennt einen Tablespace, den es im Backend nicht gibt |
+| `orm.ErrPlacementMismatch` | Partition liegt nicht im deklarierten Tablespace (Umbindung ist Betriebsaktion) |
+| `orm.ErrRegionHasData` | `RemoveRegion` auf eine Region, die noch Zeilen hält |
+| `orm.ErrUniqueConflict` | Engine-seitige Unique-Prüfung über alle Regionen (Geo-Modelle) |
 | `orm.ErrVersionConflict` | Optimistisches Locking: CRUD-`version` oder Aggregat-Version veraltet |
 | `orm.ErrWaitTimeout` | `WaitFor`-Frist abgelaufen, Projektion hing hinterher |
 | `orm.ErrSchemaDrift` | Modelle geändert ohne `SchemaVersion`-Erhöhung |

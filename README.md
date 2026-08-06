@@ -53,6 +53,28 @@ ORMPP_TEST_BACKEND=yugabyte ORMPP_TEST_DSN="postgres://yugabyte@localhost:5434/y
 
 Jeder Test bekommt dabei ein eigenes Schema (search_path) und räumt es am Ende weg. Die CI fährt dieselbe Matrix (SQLite, PostgreSQL, YugabyteDB als Services).
 
+### Nachweis physischer Geo-Residenz
+
+Dass eine Region mehr ist als ein Spaltenwert, lässt sich nur an einem echten
+Mehr-Knoten-Cluster zeigen. `docker-compose.geo.yml` startet drei
+YugabyteDB-Knoten mit je einer `--placement_region`:
+
+```sh
+docker compose -f docker-compose.geo.yml up -d   # eu-central, eu-southwest, na
+./scripts/geo-tablespaces.sh                     # Tablespaces je Region (Betriebsaufgabe)
+
+ORMPP_TEST_BACKEND=yugabyte \
+ORMPP_TEST_DSN="postgres://yugabyte@localhost:5435/yugabyte" \
+ORMPP_TEST_PLACEMENTS="eu-central=ts_eu_central,eu-southwest=ts_eu_southwest,na=ts_na" \
+  go test -race -run TestGeoResidenzPhysisch ./...
+```
+
+Der Test misst über `yb_local_tablets`, wo die Tablets tatsächlich liegen —
+nicht, was in der `geo`-Spalte steht — und zwar für Event-Logs **und**
+CRUD-Tabellen: mit deklarierter Topologie partitioniert ORM++ sämtliche
+Tabellen eines Nicht-GeoGlobal-Models nach Geo. Ohne `ORMPP_TEST_PLACEMENTS`
+überspringt er sich; die normale Suite braucht den Cluster nicht.
+
 ### Workflow
 
 - Default-Branch: `develop`. `main` ist geschützt — nur Merge Requests aus `develop` mit grüner Pipeline.

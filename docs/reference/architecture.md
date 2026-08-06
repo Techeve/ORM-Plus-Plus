@@ -97,7 +97,7 @@ Pro Event-Sourced-Model entstehen drei Tabellen (Beispiel `zones`):
 |---|---|
 | `zones` | Read-Model: eine Zeile pro Aggregat, Spalten aus dem Struct plus `aggregate_seq`. Der Query-Builder liest hiergegen — Lesen kostet wie bei CRUD. |
 | `zones_events` | Append-only-Log. Spalten: `geo`, `tenant_id`, `aggregate_id`, `aggregate_seq`, `seq` (je Geo monoton), `event_id` (UUIDv7), `occurred_at`, `type_id`, `data` (JSON/JSONB). |
-| `zones_snapshots` | `aggregate_id`, `aggregate_seq`, `taken_at`, `state`. **Nicht** append-only: ältere Snapshots werden nach Policy gelöscht (Default `KeepLast(2)`). |
+| `zones_snapshots` | `aggregate_id`, `aggregate_seq`, `geo`, `taken_at`, `state`. **Nicht** append-only: ältere Snapshots werden nach Policy gelöscht (Default `KeepLast(2)`). Residiert wie das Aggregat. |
 
 Ein Snapshot ist dabei keine separate Berechnung, sondern der serialisierte
 Aggregat-Zustand nach Event N — derselbe `Apply`-Code, der auch beim Laden

@@ -88,7 +88,27 @@ func (sqliteDialect) forUpdate() string { return "" }
 // die Geo-Spalte trägt weiter das deklarierte Daten-Geo.
 func (sqliteDialect) partitionClause() string { return "" }
 
-func (sqliteDialect) partitionSQL(table string, regions []string) []string { return nil }
+func (sqliteDialect) partitionSQL(string, []regionPlacement) []string { return nil }
+
+func (sqliteDialect) adoptRegionSQL(string, []string, regionPlacement) []string { return nil }
+
+// Ohne Partitionen gibt es nichts zu platzieren — die Deklaration bleibt
+// gültig, nur ohne physische Wirkung (Verhaltensgleichheit).
+func (sqliteDialect) placementExists(queryer, string) (bool, error) { return true, nil }
+
+func (sqliteDialect) geoPartitions(queryer, string) (map[string]string, error) { return nil, nil }
+
+func (d sqliteDialect) tableKind(q queryer, table string) (byte, error) {
+	cols, err := d.tableColumns(q, table)
+	if err != nil || len(cols) == 0 {
+		return 0, err
+	}
+	return 'r', nil
+}
+
+func (sqliteDialect) incomingFKs(queryer, string) ([][2]string, error) { return nil, nil }
+
+func (sqliteDialect) tableIndexes(queryer, string) ([]string, error) { return nil, nil }
 
 func (sqliteDialect) dualWriteTriggerSQL(table, pk string) []string {
 	now := `strftime('%Y-%m-%dT%H:%M:%fZ','now')`

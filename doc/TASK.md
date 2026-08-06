@@ -5,7 +5,30 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 
 ## Aktueller Schritt
 
-**Phase 5 abgeschlossen** — alle v1-API-Flächen sind implementiert, keine Stubs mehr. 48 Tests laufen backend-identisch auf SQLite, PostgreSQL und YugabyteDB. Vor einem v1.0-Tag stehen noch: Lizenzentscheidung (Betreiber), Lasttests/Fehlerinjektion und das Beispielprojekt (siehe „Vor dem Release").
+**Phase 6 — Geo-Residenz physisch** (aus einem Anwenderbefund an v1.1.1: „die Region bleibt ein Etikett"). Abgeschlossen, siehe unten. Davor: **Phase 5 abgeschlossen** — alle v1-API-Flächen implementiert, keine Stubs mehr.
+
+## Phase 6: Geo-Residenz physisch
+
+| # | Baustein | Status |
+|---|---|---|
+| 6.1 | `Placement` landet in der DDL: `dialect.partitionSQL` bekommt `regionPlacement` statt nackter Namen, Partitionen entstehen mit `TABLESPACE`. Existenz wird vor jeder DDL geprüft (`ErrPlacementNotFound`) — ORM++ legt **keine** Tablespaces an | ✅ |
+| 6.2 | `reconcileGeoPartitions` bei **jedem** `Migrate` (nicht nur Erstinstallation): fehlende Regionen bekommen ihre Partition, in der DEFAULT-Partition liegengebliebene Zeilen ziehen mit (`adoptRegionSQL`), idempotent/wiederaufnehmbar. Lease-koordiniert | ✅ |
+| 6.3 | Umzugs-API: `db.MoveTenant(ctx, tenant, region)` über alle Modelle (CRUD, ES-Read-Model, Event-Log mit Reseq, Archiv), batchweise + idempotent; `repo.SetGeo` für `GeoScoped` und für ES-Aggregate geöffnet | ✅ |
+| 6.4 | Explizite Betriebsoperationen: `db.RemoveRegion` (scheitert mit `ErrRegionHasData`, solange Zeilen da sind), Drift-Meldung `ErrPlacementMismatch` | ✅ |
+| 6.5 | Nachweis: `geo_test.go` auf allen drei Backends + `TestGeoResidenzPhysisch` gegen echten Drei-Regionen-Cluster (`docker-compose.geo.yml`, `scripts/geo-tablespaces.sh`) | ✅ |
+| 6.6 | **Kernfähigkeit — alle Tabellen:** CRUD- und ES-Read-Model-Tabellen `PARTITION BY LIST (geo)` sobald Topologie deklariert (PK physisch `(pk, geo)`, Partitionen mit Placement) | ✅ |
+| 6.7 | Engine-Semantik ohne native FKs auf partitionierte Ziele: `checkRef` (bestand), restrict-Vorprüfung (bestand), **setnull/cascade-Emulation** (rekursiv, restrict-Schutz je Ebene), Cross-Geo-Unique-Vorprüfung (`ErrUniqueConflict`), zweistufiger Upsert (findet umgezogene Datensätze in jeder Region) — topologie-, nicht backend-gebunden | ✅ |
+| 6.8 | Archiv partitioniert; Snapshots tragen `geo` (additiv nachgerüstet + Backfill aus dem Event-Log) und sind partitioniert; `MoveTenant`/`SetGeo` ziehen beide mit um | ✅ |
+| 6.9 | Bestands-Umbau: `Migrate` überführt unpartitionierte Alt-Tabellen (relkind `r`) selbsttätig in die partitionierte Form — eingehende FKs lösen, Indizes beiseite benennen (`_vorgeo`), rename, Neuanlage, idempotente Kopie, Drop; wiederaufnehmbar, lease-koordiniert | ✅ |
+
+### Phase-6-Notizen
+
+- **`ALTER TABLE … SET TABLESPACE` ist eine Falle** und wird bewusst nicht verwendet. YugabyteDB nimmt es an, meldet „data movement successfully initiated" und schreibt `reltablespace` um — ohne `ysql_beta_feature_tablespace_alteration` bewegen sich die Tablets aber nicht. Der Katalog behauptete dann eine Platzierung, die es nicht gibt, was schlimmer ist als gar nichts. Die Bindung entsteht **nur** beim `CREATE TABLE` der Partition; für Bestandspartitionen im falschen Tablespace meldet `Migrate` `ErrPlacementMismatch`.
+- **Adopt-Pfad ohne umschließende Transaktion:** YB sieht das `DELETE` einer noch offenen Transaktion beim `ATTACH PARTITION` nicht und lehnt mit „updated partition constraint for default partition would be violated" ab (nachgemessen). Die Anweisungsfolge ist deshalb einzeln ausgeführt und jede für sich wiederholbar; ein Abbruch hinterlässt die noch nicht angeschlossene Partition, der nächste `Migrate` führt sie zu Ende.
+- **Reseq beim Umzug:** `seq` ist pro Geo monoton. Umgezogene Events bekommen neue `seq` am Ende der Zielregion, sonst kollidierten sie mit `ux_<tabelle>_geo_seq`. Projektionen der Zielregion wenden sie als Nachzügler erneut an — at-least-once, idempotent, wie überall sonst auch.
+- **CRUD-Partitionierung und der FK-Konflikt (6.6/6.7):** Ein FK auf eine nach `geo` partitionierte Tabelle ist nicht darstellbar — PostgreSQL verlangt für `REFERENCES eltern(id)` ein Unique auf `(id)`, ein Unique auf einer partitionierten Tabelle muss aber den Partitionsschlüssel enthalten (nachgemessen). Die Auflösung: **die Engine ist die Autorität**, der native FK war immer nur Backstop. `checkRef` (Existenz + Tenant) und die restrict-Vorprüfung gab es schon; neu sind setnull/cascade-Emulation, Cross-Geo-Unique-Vorprüfung und der zweistufige Upsert. FKs, die physisch möglich bleiben (Tenant-FK von partitionierter Tabelle auf `ormpp_tenants`, FKs auf GeoGlobal-Ziele), bleiben in der DDL — nachgemessen auf PG und YB, dass FKs *von* partitionierten Tabellen funktionieren, ebenso Zeilen-Trigger auf Parents, `FOR UPDATE`, `ON CONFLICT (pk, geo)` und additive `ALTER` auf Parents.
+- **Wettlauf-Restfälle über Partitionsgrenzen** (zwei gleichzeitige Inserts mit gleichem Unique-Wert in verschiedenen Regionen; Insert eines Kinds während der Parent parallel gelöscht wird) sind nicht constraint-durchsetzbar — dieselbe dokumentierte Grenze wie beim ES-Geo-Pinning. Auf SQLite fängt der weiterhin globale physische Index bzw. der native FK diese Fälle zusätzlich.
+- **Bestands-Umbau (6.9)** läuft stepwise ohne umschließende Transaktion (YB): rename → Neuanlage → Kopie (NOT EXISTS über den fachlichen Schlüssel) → Drop. Schreibzugriffe treffen ab der Neuanlage die neue Tabelle und gehen nicht verloren; im kurzen Fenster zwischen rename und Neuanlage schlagen Schreiber hart fehl (fail-stop, kein Silent-Loss), Reads während der Kopie können unvollständig sein. Verlorene *Deletes* im Kopierfenster sind theoretisch möglich — Umbau daher in eine ruhige Phase legen. Ein Abbruch wird am Marker `<tabelle>_vorgeo` erkannt und beim nächsten `Migrate` zu Ende geführt.
 
 ## Phase-5-Arbeitsplan (ein Commit je Baustein)
 

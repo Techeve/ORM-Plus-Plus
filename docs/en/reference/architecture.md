@@ -95,7 +95,7 @@ Every event-sourced model produces three tables (example `zones`):
 |---|---|
 | `zones` | Read model: one row per aggregate, columns from the struct plus `aggregate_seq`. The query builder reads against this — reads cost the same as with CRUD. |
 | `zones_events` | Append-only log. Columns: `geo`, `tenant_id`, `aggregate_id`, `aggregate_seq`, `seq` (monotonic per geo), `event_id` (UUIDv7), `occurred_at`, `type_id`, `data` (JSON/JSONB). |
-| `zones_snapshots` | `aggregate_id`, `aggregate_seq`, `taken_at`, `state`. **Not** append-only: older snapshots are deleted per policy (default `KeepLast(2)`). |
+| `zones_snapshots` | `aggregate_id`, `aggregate_seq`, `geo`, `taken_at`, `state`. **Not** append-only: older snapshots are deleted per policy (default `KeepLast(2)`). Resides with its aggregate. |
 
 A snapshot is not a separate computation but the serialized aggregate state
 after event N — the same `Apply` code that also folds on load. This avoids a

@@ -192,9 +192,14 @@ func registriereBasis(db *orm.DB) {
 	// alle Regionen physisch auf eine — die Deklaration bleibt gültig,
 	// Daten-Geos werden weiter validiert (Verhaltensgleichheit). Auf
 	// YugabyteDB partitionieren die Event-Tabellen nativ nach Geo.
+	//
+	// Ohne orm.Placement(...): das benennt einen Tablespace, den es im
+	// Backend geben MUSS (sonst ErrPlacementNotFound). Damit dieselbe Datei
+	// unverändert gegen Postgres/Yugabyte läuft, bleibt es hier bei der
+	// logischen Topologie — echte Residenz zeigt docs/guides/geo.md.
 	orm.Topology(db,
-		orm.Region("eu-central", orm.Placement("demo.eu-central-1")),
-		orm.Region("us-east", orm.Placement("demo.us-east-1")),
+		orm.Region("eu-central"),
+		orm.Region("us-east"),
 	)
 
 	orm.Register[Betreiber](db, orm.CRUD())
@@ -475,6 +480,14 @@ func generation1(pfad string, schluessel []byte) {
 		orm.WithGeo(ctx, "eu-central", orm.ReplicateTo("us-east")), sp))
 	must(orm.Repo[SyncProfile](db).SetGeo(ctx, sp.ID, "us-east", orm.ReplicateAll()))
 	fmt.Println("• GeoFlexible: Heimat eu-central→us-east verlegt, ReplicateAll gesetzt")
+
+	// --- Geo: Umzug eines ganzen Mandanten ---------------------------------
+	// Eine Organisation wechselt die Region: CRUD-Zeilen, Read-Models und
+	// Event-Logs ziehen gemeinsam um. Auf partitionierten Backends wandern
+	// die Zeilen dabei physisch in die Partition der Zielregion.
+	must(db.MoveTenant(bg, kunde.ID, "us-east"))
+	fmt.Println("• MoveTenant: alle Daten des Mandanten liegen jetzt in us-east")
+	must(db.MoveTenant(bg, kunde.ID, "eu-central")) // und wieder zurück
 
 	// Daten-Geo wird gegen die Topologie validiert:
 	if err := orm.Repo[Betreiber](db).Insert(orm.WithGeo(ctx, "mars"), &Betreiber{Name: "?"}); errors.Is(err, orm.ErrRegionNotActive) {

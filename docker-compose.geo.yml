@@ -1,0 +1,66 @@
+# Drei-Regionen-YugabyteDB für den Nachweis physischer Geo-Residenz.
+# Je ein Knoten mit eigenem --placement_region; damit lässt sich prüfen,
+# dass die Zeilen einer Region auch wirklich nur auf deren Knoten liegen —
+# der Spaltenwert allein beweist das nicht.
+#
+#   docker compose -f docker-compose.geo.yml up -d
+#   ./scripts/geo-tablespaces.sh              # legt die Tablespaces an (Betriebsaufgabe)
+#   ORMPP_TEST_BACKEND=yugabyte \
+#   ORMPP_TEST_DSN="postgres://yugabyte@localhost:5435/yugabyte" \
+#   ORMPP_TEST_PLACEMENTS="eu-central=ts_eu_central,eu-southwest=ts_eu_southwest,na=ts_na" \
+#     go test -race -run TestGeoResidenzPhysisch ./...
+#
+# Der Cluster braucht spürbar RAM (drei Knoten). Für die normale
+# Verhaltenssuite genügt der Ein-Knoten-Dienst aus docker-compose.yml.
+name: ormpp-geo
+
+x-node: &node
+  image: yugabytedb/yugabyte:2024.2.9.1-b8
+  # 2024.2 LTS — dieselbe Reihe, die in der DNS-Editor-Cloud läuft.
+  healthcheck:
+    test: ["CMD-SHELL", "bin/ysqlsh -h $$(hostname) -c 'SELECT 1' || exit 1"]
+    interval: 5s
+    timeout: 5s
+    retries: 60
+
+services:
+  yb-eu-central:
+    <<: *node
+    container_name: ormpp-geo-eu-central
+    command:
+      - bin/yugabyted
+      - start
+      - --background=false
+      - --cloud_location=cloud1.eu-central.eu-central-1a
+      - --fault_tolerance=region
+    ports:
+      - "5435:5433" # YSQL — der Einstiegspunkt für die Tests
+      - "15435:15433"
+
+  yb-eu-southwest:
+    <<: *node
+    container_name: ormpp-geo-eu-southwest
+    command:
+      - bin/yugabyted
+      - start
+      - --background=false
+      - --cloud_location=cloud1.eu-southwest.eu-southwest-1a
+      - --fault_tolerance=region
+      - --join=yb-eu-central
+    depends_on:
+      yb-eu-central:
+        condition: service_healthy
+
+  yb-na:
+    <<: *node
+    container_name: ormpp-geo-na
+    command:
+      - bin/yugabyted
+      - start
+      - --background=false
+      - --cloud_location=cloud1.na.na-1a
+      - --fault_tolerance=region
+      - --join=yb-eu-central
+    depends_on:
+      yb-eu-central:
+        condition: service_healthy

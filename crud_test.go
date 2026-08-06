@@ -64,6 +64,7 @@ func mustInsertUser(t *testing.T, db *DB, ctx context.Context, email string) *Us
 }
 
 func TestInsertGetRoundtrip(t *testing.T) {
+	t.Parallel()
 	db, ctx := testDB(t)
 	u := mustInsertUser(t, db, ctx, "a@example.org")
 
@@ -84,6 +85,7 @@ func TestInsertGetRoundtrip(t *testing.T) {
 }
 
 func TestTenantScopeFailClosed(t *testing.T) {
+	t.Parallel()
 	db, _ := testDB(t)
 	noTenant := context.Background()
 
@@ -96,6 +98,7 @@ func TestTenantScopeFailClosed(t *testing.T) {
 }
 
 func TestTenantIsolationAlsoByID(t *testing.T) {
+	t.Parallel()
 	db, ctx := testDB(t)
 	u := mustInsertUser(t, db, ctx, "a@example.org")
 
@@ -115,6 +118,7 @@ func TestTenantIsolationAlsoByID(t *testing.T) {
 }
 
 func TestUnknownTenantRejected(t *testing.T) {
+	t.Parallel()
 	db, _ := testDB(t)
 	ghost := WithTenant(context.Background(), NewID())
 	if err := Repo[User](db).Insert(ghost, &User{Email: "g@example.org"}); !errors.Is(err, ErrUnknownTenant) {
@@ -123,6 +127,7 @@ func TestUnknownTenantRejected(t *testing.T) {
 }
 
 func TestArchivedTenantBlocksWrites(t *testing.T) {
+	t.Parallel()
 	db, _ := testDB(t)
 	ten, _ := db.Tenants().Create(context.Background(), TenantInfo{Name: "Kunde"})
 	ctx := WithTenant(context.Background(), ten.ID)
@@ -141,6 +146,7 @@ func TestArchivedTenantBlocksWrites(t *testing.T) {
 }
 
 func TestRequiredEnumDefault(t *testing.T) {
+	t.Parallel()
 	db, ctx := testDB(t)
 	u := mustInsertUser(t, db, ctx, "a@example.org")
 	docs := Repo[Document](db)
@@ -166,6 +172,7 @@ func TestRequiredEnumDefault(t *testing.T) {
 }
 
 func TestReferences(t *testing.T) {
+	t.Parallel()
 	db, ctx := testDB(t)
 	u := mustInsertUser(t, db, ctx, "a@example.org")
 	docs := Repo[Document](db)
@@ -201,6 +208,7 @@ func TestReferences(t *testing.T) {
 }
 
 func TestOptimisticLocking(t *testing.T) {
+	t.Parallel()
 	db, ctx := testDB(t)
 	u := mustInsertUser(t, db, ctx, "a@example.org")
 	docs := Repo[Document](db)
@@ -222,6 +230,7 @@ func TestOptimisticLocking(t *testing.T) {
 }
 
 func TestImmutableExcludedFromUpdate(t *testing.T) {
+	t.Parallel()
 	db, ctx := testDB(t)
 	u := mustInsertUser(t, db, ctx, "a@example.org")
 	u2 := mustInsertUser(t, db, ctx, "b@example.org")
@@ -244,6 +253,7 @@ func TestImmutableExcludedFromUpdate(t *testing.T) {
 }
 
 func TestQueryBuilder(t *testing.T) {
+	t.Parallel()
 	db, ctx := testDB(t)
 	u := mustInsertUser(t, db, ctx, "a@example.org")
 	docs := Repo[Document](db)
@@ -296,6 +306,7 @@ func TestQueryBuilder(t *testing.T) {
 }
 
 func TestInsertManyChunked(t *testing.T) {
+	t.Parallel()
 	db, ctx := testDB(t)
 	var users []*User
 	for i := 0; i < 25; i++ {
@@ -311,6 +322,7 @@ func TestInsertManyChunked(t *testing.T) {
 }
 
 func TestUniqueCompositePerTenant(t *testing.T) {
+	t.Parallel()
 	db, ctx := testDB(t)
 	u := mustInsertUser(t, db, ctx, "a@example.org")
 	docs := Repo[Document](db)
@@ -323,6 +335,7 @@ func TestUniqueCompositePerTenant(t *testing.T) {
 }
 
 func TestTxRollbackAndGetForUpdate(t *testing.T) {
+	t.Parallel()
 	db, ctx := testDB(t)
 	u := mustInsertUser(t, db, ctx, "a@example.org")
 	users := Repo[User](db)
@@ -366,6 +379,7 @@ func TestTxRollbackAndGetForUpdate(t *testing.T) {
 }
 
 func TestTenantFreeModel(t *testing.T) {
+	t.Parallel()
 	db, _ := testDB(t)
 	noTenant := context.Background()
 	cfg := Repo[SysConfig](db)
@@ -381,6 +395,7 @@ func TestTenantFreeModel(t *testing.T) {
 }
 
 func TestSchemaDriftAndAdditiveDiff(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 
 	open := func() *DB {
@@ -425,6 +440,7 @@ func TestSchemaDriftAndAdditiveDiff(t *testing.T) {
 }
 
 func TestTopologyGeoValidation(t *testing.T) {
+	t.Parallel()
 	db, err := Open(newTestStore(t)())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -454,6 +470,7 @@ func TestTopologyGeoValidation(t *testing.T) {
 }
 
 func TestUpsert(t *testing.T) {
+	t.Parallel()
 	db, ctx := testDB(t)
 	u := mustInsertUser(t, db, ctx, "a@example.org")
 	docs := Repo[Document](db)

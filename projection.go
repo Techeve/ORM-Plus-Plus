@@ -250,7 +250,13 @@ func (d *DB) projectAggregate(ctx context.Context, q queryer, m *model, aggID st
 	for _, c := range cols[1:] {
 		updates = append(updates, fmt.Sprintf("%q = excluded.%q", c, c))
 	}
-	query := insertSQL(m.table, cols) + fmt.Sprintf(` ON CONFLICT ("id") DO UPDATE SET %s`, strings.Join(updates, ", "))
+	// Partitioniertes Read-Model: der Unique hinter ON CONFLICT ist (id, geo).
+	// Das Geo ist am Aggregat gepinnt — dieselbe Zeile trifft immer dasselbe Ziel.
+	target := `"id"`
+	if d.partModel(m) {
+		target = `"id", "geo"`
+	}
+	query := insertSQL(m.table, cols) + fmt.Sprintf(` ON CONFLICT (%s) DO UPDATE SET %s`, target, strings.Join(updates, ", "))
 	_, err = q.ExecContext(ctx, query, vals...)
 	return err
 }
@@ -472,16 +478,26 @@ func (d *DB) snapshotAggregate(ctx context.Context, m *model, aggID string, tena
 	if err != nil {
 		return fmt.Errorf("orm: Snapshot von %s serialisieren: %w", m.name, err)
 	}
+	// Der Snapshot residiert wie sein Aggregat: das Geo kommt aus dem
+	// Event-Log (Hot, sonst Archiv) — gepinnt seit dem ersten Event.
+	geo, err := d.aggregateGeo(ctx, m, aggID)
+	if err != nil {
+		return err
+	}
 	sn := esSnapsTable(m)
-	cols := []string{"aggregate_id", "aggregate_seq", "taken_at", "state"}
-	vals := []any{aggID, agg.version, nowUTC().Format(time.RFC3339Nano), state}
+	cols := []string{"aggregate_id", "aggregate_seq", "geo", "taken_at", "state"}
+	vals := []any{aggID, agg.version, geo, nowUTC().Format(time.RFC3339Nano), state}
 	if m.tenanted() {
 		cols = append(cols, "tenant_id")
 		vals = append(vals, tenant.String())
 	}
+	target := `"aggregate_id", "aggregate_seq"`
+	if d.partModel(m) {
+		target = `"aggregate_id", "aggregate_seq", "geo"`
+	}
 	return d.Tx(ctx, func(tx Tx) error {
-		query := insertSQL(sn, cols) + ` ON CONFLICT ("aggregate_id", "aggregate_seq")
-			DO UPDATE SET taken_at = excluded.taken_at, state = excluded.state`
+		query := insertSQL(sn, cols) + fmt.Sprintf(` ON CONFLICT (%s)
+			DO UPDATE SET taken_at = excluded.taken_at, state = excluded.state`, target)
 		if _, err := tx.q().ExecContext(ctx, query, vals...); err != nil {
 			return err
 		}

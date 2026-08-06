@@ -57,8 +57,40 @@ type dialect interface {
 	partitionClause() string
 	// partitionSQL erzeugt die Partitionen einer Event-Tabelle: eine je
 	// Region plus eine DEFAULT-Partition (idempotent).
-	partitionSQL(table string, regions []string) []string
+	partitionSQL(table string, regions []regionPlacement) []string
+	// adoptRegionSQL löst eine Region aus der DEFAULT-Partition heraus:
+	// Partition anlegen, vorhandene Zeilen umhängen, anschließen. Nötig,
+	// weil PG/YB keine Partition anlegen können, solange die
+	// DEFAULT-Partition passende Zeilen hält.
+	adoptRegionSQL(table string, key []string, r regionPlacement) []string
+	// placementExists prüft, ob ein deklariertes Placement (Tablespace)
+	// im Backend existiert. Backends ohne Placements melden true.
+	placementExists(q queryer, name string) (bool, error)
+	// geoPartitions liefert die vorhandenen Geo-Partitionen einer Tabelle:
+	// Region → Placement ("" = Default-Tablespace). Die DEFAULT-Partition
+	// erscheint unter geoDefaultRegion.
+	geoPartitions(q queryer, table string) (map[string]string, error)
+	// tableKind klassifiziert eine Tabelle: 'r' normal, 'p' partitioniert,
+	// 0 = existiert nicht. Backends ohne Partitionierung melden nie 'p'.
+	tableKind(q queryer, table string) (byte, error)
+	// incomingFKs liefert Fremdschlüssel ANDERER Tabellen, die auf diese
+	// Tabelle zeigen — als DROP-CONSTRAINT-Paare (Tabelle, Constraint).
+	incomingFKs(q queryer, table string) ([][2]string, error)
+	// tableIndexes liefert die Indexnamen einer Tabelle (inkl. PK-Index).
+	tableIndexes(q queryer, table string) ([]string, error)
 }
+
+// regionPlacement bindet eine Region an ihren physischen Standort — auf
+// PG/YB ein Tablespace, der auf YB per replica_placement die Zeilen
+// tatsächlich in der Region hält. Leeres placement = Backend entscheidet.
+type regionPlacement struct {
+	name      string
+	placement string
+}
+
+// geoDefaultRegion ist der Schlüssel der DEFAULT-Partition in
+// geoPartitions — ein gültiger Regionsname kann so nicht heißen.
+const geoDefaultRegion = "\x00default"
 
 type queryer interface {
 	ExecContext(ctx ctxType, query string, args ...any) (sql.Result, error)
