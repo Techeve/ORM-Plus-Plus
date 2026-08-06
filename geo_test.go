@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -838,5 +839,66 @@ func TestSnapshotResidiertBeimAggregat(t *testing.T) {
 	loaded, err := Load[Ticket](ctx, db, tk.ID())
 	if err != nil || loaded.Title != "Snap" {
 		t.Fatalf("Load nach Snapshot-Umzug: %+v (%v)", loaded, err)
+	}
+}
+
+// TestUmzugVerliertKeineEreignisse sichert die Zusage, deren Bruch am
+// teuersten wäre: ein Verbraucher, der die Ereignisse zum Zeitpunkt des
+// Umzugs noch nicht gesehen hat, muss sie danach bekommen. Behielten die
+// Ereignisse ihre seq, lägen sie in der Zielregion hinter einem Lesezeiger,
+// der dort längst weiter ist — sie fielen lautlos aus jeder Projektion.
+// Deshalb vergibt der Umzug am Ziel-Ende neue Nummern.
+func TestUmzugVerliertKeineEreignisse(t *testing.T) {
+	t.Parallel()
+	bg := context.Background()
+	db, _ := geoTestDB(t, newTestStore(t), Region("eu-central"), Region("na"))
+
+	var mu sync.Mutex
+	gesehen := map[string]bool{}
+	OnEvent[Ticket](db, "ticket.*", func(_ context.Context, ce CloudEvent, _ Tx) error {
+		mu.Lock()
+		defer mu.Unlock()
+		gesehen[ce.ID] = true
+		return nil
+	}, Named("umzug-view"))
+
+	bleibt, err := db.Tenants().Create(bg, TenantInfo{Name: "Bleibt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zieht, err := db.Tenants().Create(bg, TenantInfo{Name: "Zieht"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Die Zielregion ist bereits belegt UND abgearbeitet: der Lesezeiger
+	// dort steht am Ende.
+	if _, err := New[Ticket](db).Append(WithGeo(WithTenant(bg, bleibt.ID), "na"),
+		TicketOpened{Title: "schon da"}, NoteAdded{Note: "belegt seq 1+2"}); err != nil {
+		t.Fatal(err)
+	}
+	db.processOnce(bg)
+	mu.Lock()
+	vorher := len(gesehen)
+	mu.Unlock()
+	if vorher != 2 {
+		t.Fatalf("Vorlauf: %d Zustellungen, erwartet 2", vorher)
+	}
+
+	// Diese beiden sieht der Verbraucher bewusst noch nicht.
+	if _, err := New[Ticket](db).Append(WithGeo(WithTenant(bg, zieht.ID), "eu-central"),
+		TicketOpened{Title: "zieht um"}, NoteAdded{Note: "ungelesen"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MoveTenant(bg, zieht.ID, "na"); err != nil {
+		t.Fatalf("MoveTenant: %v", err)
+	}
+
+	db.processOnce(bg)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(gesehen) != 4 {
+		t.Fatalf("nach dem Umzug %d verschiedene Ereignisse zugestellt, erwartet 4 — "+
+			"umgezogene Ereignisse sind aus der Projektion gefallen", len(gesehen))
 	}
 }
