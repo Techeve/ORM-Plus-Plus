@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -352,5 +353,130 @@ func TestTenantPurge(t *testing.T) {
 	}
 	if audits != 1 {
 		t.Fatalf("Audit-Eintrag fehlt: %d", audits)
+	}
+}
+
+// Nachträglich per Migrate ergänzte encrypted-Spalten: ALTER ADD COLUMN
+// befüllt Bestandszeilen über das Blob-Zero-Literal ('\x' auf PG/YB, x”
+// auf SQLite) mit einem LEEREN Nicht-NULL-Blob. Der zählt beim Dekodieren
+// wie NULL statt am Ciphertext-Parser zu scheitern — vor dem Fix brach
+// damit JEDER Lesezugriff aufs Model, einschließlich der Migration selbst
+// (Fund beim DNS-Editor-Beta-Update auf YugabyteDB, 2026-08-07).
+func TestAlterAddedEncryptedColumnReadsAsZero(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	bg := context.Background()
+	ctx := WithTenant(bg, SingleTenant)
+
+	// v1: Modell ohne encrypted-Felder, eine Bestandszeile.
+	{
+		type Locker struct {
+			ID   ID     `orm:"pk"`
+			Name string `orm:"required"`
+		}
+		db, err := Open(store())
+		if err != nil {
+			t.Fatal(err)
+		}
+		Register[Locker](db, CRUD())
+		SchemaVersion(db, 1)
+		if err := db.Migrate(bg); err != nil {
+			t.Fatalf("Migrate v1: %v", err)
+		}
+		if err := Repo[Locker](db).Insert(ctx, &Locker{Name: "alt"}); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+	}
+
+	// v2: encrypted-Felder kommen per ALTER dazu — die Bestandszeile bleibt
+	// lesbar und liefert Zero-Values (Pointer bleibt nil, wie bei NULL).
+	{
+		type Locker struct {
+			ID     ID      `orm:"pk"`
+			Name   string  `orm:"required"`
+			Secret string  `orm:"encrypted"`
+			Raw    []byte  `orm:"encrypted"`
+			Hint   *string `orm:"encrypted"`
+		}
+		db, err := Open(store(), Encryption(StaticKey(testKey(7))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		Register[Locker](db, CRUD())
+		SchemaVersion(db, 2)
+		if err := db.Migrate(bg); err != nil {
+			t.Fatalf("Migrate v2: %v", err)
+		}
+		defer db.Close()
+
+		rows, err := Query[Locker](db, ctx).All()
+		if err != nil {
+			t.Fatalf("Bestandszeile mit nachgerüsteter encrypted-Spalte lesen: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Name != "alt" {
+			t.Fatalf("rows = %+v", rows)
+		}
+		if rows[0].Secret != "" || rows[0].Raw != nil || rows[0].Hint != nil {
+			t.Fatalf("Zero-Values erwartet, bekam %+v", rows[0])
+		}
+
+		// Schreiben und Zurücklesen funktioniert normal weiter — danach liegt
+		// echter Ciphertext in der Spalte.
+		l := rows[0]
+		l.Secret = "streng geheim"
+		hint := "unter der Matte"
+		l.Hint = &hint
+		if err := Repo[Locker](db).Update(ctx, l); err != nil {
+			t.Fatal(err)
+		}
+		l, err = Query[Locker](db, ctx).First()
+		if err != nil || l.Secret != "streng geheim" || l.Hint == nil || *l.Hint != "unter der Matte" {
+			t.Fatalf("roundtrip = %+v (%v)", l, err)
+		}
+	}
+}
+
+// Der Dekodier-Pfad selbst, backend-frei: leere Blobs heilen zu Zero-Values,
+// NULL bleibt NULL, echter Ciphertext dekodiert unverändert.
+func TestDecodeEncryptedHealsEmptyBlob(t *testing.T) {
+	t.Parallel()
+	d := &DB{opts: openOptions{keys: StaticKey(testKey(3))}}
+	f := &field{column: "secret", dk: dEncrypted}
+
+	for name, raw := range map[string]any{
+		"leeres Blob": []byte{},
+		"NULL":        nil,
+	} {
+		s := "vorbelegt" // beweist, dass wirklich genullt wird
+		target := reflect.ValueOf(&s).Elem()
+		if err := decodeField(d, f, target, raw); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if s != "" {
+			t.Fatalf("%s: s = %q, erwartet leer", name, s)
+		}
+		// Pointer-Ziel: bleibt nil, symmetrisch zu NULL.
+		p := &s
+		ptarget := reflect.ValueOf(&p).Elem()
+		if err := decodeField(d, f, ptarget, raw); err != nil {
+			t.Fatalf("%s (Pointer): %v", name, err)
+		}
+		if p != nil {
+			t.Fatalf("%s (Pointer): p = %v, erwartet nil", name, p)
+		}
+	}
+
+	// Echter Ciphertext dekodiert weiterhin.
+	blob, err := encryptValue(d.opts.keys, []byte("wert"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s string
+	if err := decodeField(d, f, reflect.ValueOf(&s).Elem(), blob); err != nil {
+		t.Fatal(err)
+	}
+	if s != "wert" {
+		t.Fatalf("s = %q", s)
 	}
 }
