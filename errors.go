@@ -24,4 +24,9 @@ var (
 	ErrInvalidValue      = errors.New("orm: Wert außerhalb der enum-Wertemenge")
 	ErrRequiresTx        = errors.New("orm: Operation nur innerhalb einer Transaktion")
 	ErrTenantNotArchived = errors.New("orm: Purge erfordert archivierten Tenant")
+
+	ErrTenantNotEmpty       = errors.New("orm: Import erfordert einen leeren oder archivierten Tenant")
+	ErrImportIncomplete     = errors.New("orm: Tenant ist unvollständig — Import abgebrochen, erneut importieren")
+	ErrExportSchemaMismatch = errors.New("orm: Export stammt von einem anderen Schemastand")
+	ErrUnknownEventType     = errors.New("orm: Event-Typ ist in dieser Anlage nicht deklariert")
 )

@@ -528,6 +528,14 @@ func (d *DB) bootstrapSystemTables(ctx context.Context) error {
 			status TEXT NOT NULL CHECK (status IN ('active','archived')),
 			created_at TEXT NOT NULL
 		)`,
+		// Laufender/abgebrochener Import. Eigene Tabelle statt eines
+		// weiteren Status in ormpp_tenants: der CHECK dort ließe sich auf
+		// Bestandsanlagen nur durch einen Tabellenumbau erweitern.
+		`CREATE TABLE IF NOT EXISTS ormpp_tenant_imports (
+				tenant_id TEXT PRIMARY KEY,
+				started_at TEXT NOT NULL,
+				started_by TEXT NOT NULL
+			)`,
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS ormpp_event_types (
 			type_id %s PRIMARY KEY,
 			type TEXT NOT NULL UNIQUE

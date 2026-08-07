@@ -165,9 +165,37 @@ err = tenants.Export(ctx, id, w)
 // alle Orte. Zweistufig: Tenant muss archiviert sein (sonst
 // ErrTenantNotArchived); Vorgang wird in ormpp_schema_history auditiert.
 err = tenants.Purge(ctx, id)
+
+// Sicherung zurückspielen: aus dem Export wird ein Backup. Ersetzen, nicht
+// mischen — der Tenant muss leer oder archiviert sein (sonst
+// ErrTenantNotEmpty); ein abgebrochener Import laesst ihn erkennbar
+// unvollständig zurück (Status "importing", ErrImportIncomplete bei jedem
+// Schreibzugriff), Wiederholen führt zum korrekten Endstand.
+err = tenants.Import(ctx, id, r)
+err = tenants.Import(ctx, id, r, orm.AllowSchemaDrift())  // fremder Schemastand
 ```
 
 `orm.SingleTenant` ist ein beim Bootstrap automatisch angelegter Tenant für Single-Tenant-Apps.
+
+#### Sicherung & Wiederherstellung (`Import`)
+
+`Export` ist die DSGVO-Auskunft; zusammen mit `Import` ist es eine Sicherung. Der Vertrag:
+
+| Thema | Zusage |
+|---|---|
+| Semantik | **Ersetzen, nicht mischen.** Ziel muss `active` und leer sein (sonst `ErrTenantNotEmpty`) oder `archived` — dann ersetzt der Import den Bestand. |
+| Abbruch | Kein stiller Halb-Zustand: der Tenant steht während des Imports auf `importing`, jeder Schreibzugriff scheitert mit `ErrImportIncomplete`. Bricht der Import ab, bleibt der Status stehen. Ein erneuter Import verwirft den Rest und läuft von vorn. |
+| Abgeschnittener Strom | Der Export endet mit einer Schlusszeile (`{"type":"end"}`). Fehlt sie, lehnt der Import mit `ErrImportIncomplete` ab — ein halb geschriebener Sicherungspunkt sieht sonst aus wie ein ganzer. |
+| Verschlüsselung | Der Export enthält `encrypted`-Felder im Klartext; der Import verschlüsselt sie mit dem **aktuellen** Schlüssel der Zieldatenbank neu. Damit ist ein Import nebenbei der Weg für einen Schlüsselwechsel. |
+| Geo | Es gilt die Heimatregion des **Ziels**, nicht die des Exports — dieselbe Semantik wie `MoveTenant`. Bei mehreren Regionen ist `orm.WithGeo` Pflicht (`ErrNoGeo`). Ohne Topologie unverändert `local`. |
+| Read-Models | Werden **nicht** aus dem Strom übernommen, sondern aus den importierten Events neu projiziert — sie sind abgeleiteter Zustand. |
+| Weiterschreiben | Events landen am Ende der Geo-Sequenz der Zielregion. `Append` setzt nahtlos fort, `WaitFor` und Projektionen arbeiten wie auf gewachsenem Bestand. |
+| Schemastand | Die Kopfzeile trägt `schema_version` und die Modell-Prüfsumme. Weicht sie ab (oder fehlt sie, weil der Export vor v1.2.0 entstand), lehnt der Import mit `ErrExportSchemaMismatch` ab. `orm.AllowSchemaDrift()` lässt es bewusst zu: Event-Payloads laufen dann durch die Upcaster-Kette (unbekannte Typen ⇒ `ErrUnknownEventType`), Zeilen werden über Feldnamen zugeordnet. |
+| Speicher | Der Strom wird in Stapeln verarbeitet, nie ganz gelesen. |
+| Audit | Eine Zeile in `ormpp_schema_history` (`tenant-import`), wie bei `Purge`. |
+
+Der Import in einen **frisch angelegten** Tenant (Klonen, Staging) funktioniert genauso — die Zeilen bekommen die Tenant-ID des Ziels. Eine Einschränkung: Primärschlüssel sind pro Tabelle eindeutig, nicht pro Tenant. Ein Klon in **dieselbe** Datenbank scheitert daher an den IDs des Originals; Staging-Klone gehören in eine eigene Datenbank.
+
 
 **Tenant-Regeln (nicht abschaltbar):**
 

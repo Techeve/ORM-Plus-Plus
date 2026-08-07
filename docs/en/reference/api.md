@@ -165,9 +165,37 @@ err = tenants.Export(ctx, id, w)
 // locations. Two-stage: tenant must be archived (else
 // ErrTenantNotArchived); the operation is audited in ormpp_schema_history.
 err = tenants.Purge(ctx, id)
+
+// Restore a backup: the export stream turns tenant X back into tenant X.
+// Replace, don't merge — the target must be empty or archived (else
+// ErrTenantNotEmpty); an aborted import leaves it visibly incomplete
+// (status "importing", ErrImportIncomplete on every write), and repeating
+// it reaches the correct end state.
+err = tenants.Import(ctx, id, r)
+err = tenants.Import(ctx, id, r, orm.AllowSchemaDrift())  // foreign schema state
 ```
 
 `orm.SingleTenant` is a tenant created automatically at bootstrap for single-tenant apps.
+
+#### Backup & restore (`Import`)
+
+`Export` is the GDPR access request; together with `Import` it is a backup. The contract:
+
+| Topic | Guarantee |
+|---|---|
+| Semantics | **Replace, don't merge.** The target must be `active` and empty (else `ErrTenantNotEmpty`) or `archived` — then the import replaces what is there. |
+| Abort | No silent half state: during the import the tenant sits at `importing` and every write fails with `ErrImportIncomplete`. If the import aborts, that status stays. Running it again discards the remains and starts over. |
+| Truncated stream | The export ends with a terminator line (`{"type":"end"}`). Without it the import refuses with `ErrImportIncomplete` — a half-written backup point would otherwise look like a whole one. |
+| Encryption | The export carries `encrypted` fields in clear text; the import re-encrypts them with the target database's **current** key. An import is therefore also the path for a key rotation. |
+| Geo | The **target's** home region applies, not the export's — the same semantics as `MoveTenant`. With several regions `orm.WithGeo` is mandatory (`ErrNoGeo`). Without a topology it stays `local`. |
+| Read models | **Not** taken from the stream but re-projected from the imported events — they are derived state. |
+| Continuing | Events land at the end of the target region's geo sequence. `Append` continues seamlessly; `WaitFor` and projections behave as on grown data. |
+| Schema state | The header carries `schema_version` and the model checksum. If it differs (or is missing, because the export predates v1.2.0) the import refuses with `ErrExportSchemaMismatch`. `orm.AllowSchemaDrift()` allows it deliberately: event payloads then run through the upcaster chain (unknown types ⇒ `ErrUnknownEventType`), rows are matched by field name. |
+| Memory | The stream is processed in batches, never read as a whole. |
+| Audit | One row in `ormpp_schema_history` (`tenant-import`), as with `Purge`. |
+
+Importing into a **freshly created** tenant (cloning, staging) works the same way — the rows take the target's tenant ID. One limitation: primary keys are unique per table, not per tenant. A clone into the **same** database therefore collides with the original's IDs; staging clones belong in a database of their own.
+
 
 **Tenant rules (not switchable off):**
 

@@ -61,7 +61,8 @@ DB-Details.
 | `db.go` | `DB`-Struct, `Open`, `Register[T]`, `Migrate` (Erstinstallation/No-op/Upgrade), `Tx`, `Topology`, `Tenants`, `StartWorkers`/`Close` |
 | `schema.go` | DDL-Generierung (CRUD + ES-Read-Model/Events/Snapshots), additiver Diff |
 | `values.go` | Typ-Konversionen, `scanModelRows[T]` (inkl. Aggregat-Verdrahtung bei ES) |
-| `tenants.go` | `TenantRegistry`: Create/Get/List/Archive/Export (DSGVO, JSON Lines)/Purge (auditiert) + Cache + Insert-Verifikation |
+| `tenants.go` | `TenantRegistry`: Create/Get/List/Archive/Export (DSGVO, JSON Lines, Kopf mit Schemastand + Schlusszeile)/Purge (auditiert) + Cache + Insert-Verifikation |
+| `import.go` | `TenantRegistry.Import`: Sicherung zurückspielen — Ersetzen statt Mischen, Marke `ormpp_tenant_imports` (`ErrImportIncomplete`), Neuverschlüsselung, Geo der Gegenwart, Read-Model-Neuprojektion, auditiert |
 | `repo.go` | `Repository[T]` (CRUD; auf ES-Modellen gesperrt), `SetGeo` (GeoFlexible) |
 | `crypto.go` | `encrypted`-Felder: AES-256-GCM, `KeyProvider`/`StaticKey`, Key-ID im Ciphertext (Rotation) |
 | `observe.go` | `MigrationStatus` (Phase/Fortschritt/Worker je Region), `Health` (Instanzen/Lag/Regionen) |
@@ -75,7 +76,7 @@ DB-Details.
 | `migrator.go` | Zustandsmaschine idle→expanding→backfill→dual-write→finalizing, Backfill (checkpointed/drosselbar), Dual-Write-Trigger + Queue-Drain, `FinalizeMigration`, deprecated-Verwaltung |
 | `instances.go` | Instanzregister (`ormpp_instances`, Heartbeat/TTL) + Leases mit Fencing (`ormpp_leases`) |
 
-Tests: `crud_test.go` (Phase 1), `es_test.go` (Phase 2), `migration_test.go` (Phase 3), `crypto_test.go`/`observe_test.go` (Phase 5) — laufen **unverändert** gegen alle drei Backends. Backend-Wahl über `ORMPP_TEST_BACKEND` (sqlite|postgres|yugabyte) + `ORMPP_TEST_DSN` (`backend_test.go`: Schema-pro-Test-Isolation). Lokal: `docker compose up -d` (PG auf 5433, YB-YSQL auf 5434), siehe README.
+Tests: `crud_test.go` (Phase 1), `es_test.go` (Phase 2), `migration_test.go` (Phase 3), `crypto_test.go`/`observe_test.go` (Phase 5), `geo_test.go` (Phase 6), `import_test.go` (Phase 7) — laufen **unverändert** gegen alle drei Backends. Backend-Wahl über `ORMPP_TEST_BACKEND` (sqlite|postgres|yugabyte) + `ORMPP_TEST_DSN` (`backend_test.go`: Schema-pro-Test-Isolation). Lokal: `docker compose up -d` (PG auf 5433, YB-YSQL auf 5434), siehe README.
 
 **Beispielanwendung:** `examples/demo` (`go run ./examples/demo`) — durchkommentierte Tour über alle Fähigkeiten in zwei App-Generationen; bei API-Änderungen mitpflegen (sie kompiliert in CI mit).
 

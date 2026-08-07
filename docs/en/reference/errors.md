@@ -18,6 +18,10 @@ All errors are sentinel values checkable with `errors.Is`.
 | `orm.ErrInvalidValue` | Value outside the enum set |
 | `orm.ErrRequiresTx` | Operation (e.g. GetForUpdate) outside a transaction |
 | `orm.ErrTenantNotArchived` | Purge on a non-archived tenant |
+| `orm.ErrTenantNotEmpty` | `Import` into an active tenant that still holds data |
+| `orm.ErrImportIncomplete` | Tenant from an aborted import; stream without terminator |
+| `orm.ErrExportSchemaMismatch` | Export from a different schema state (without `AllowSchemaDrift`) |
+| `orm.ErrUnknownEventType` | Event in the stream whose type is not declared here |
 | `orm.ErrNoGeo` | Multi-region topology but no data geo in context |
 | `orm.ErrRegionNotActive` | Data geo points at a bootstrapping/draining/unknown region |
 | `orm.ErrVersionConflict` | Optimistic locking: CRUD version or aggregate version stale |

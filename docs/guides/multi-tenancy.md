@@ -54,4 +54,36 @@ err = tenants.Export(ctx, id, w)
 err = tenants.Purge(ctx, id)
 ```
 
+## Sicherung: Import
+
+`Export` allein ist eine Auskunft. Mit `Import` wird daraus eine Sicherung:
+der Strom von gestern Nacht macht Tenant X wieder zu Tenant X.
+
+```go
+// Ersetzen, nicht mischen: das Ziel muss leer oder archiviert sein.
+err = tenants.Archive(ctx, id)
+err = tenants.Import(orm.WithGeo(ctx, "eu-central"), id, r)
+```
+
+Worauf Verlass ist:
+
+- **Kein stiller Halb-Zustand.** Während des Imports steht der Tenant auf
+  `importing`, jeder Schreibzugriff scheitert mit `ErrImportIncomplete`.
+  Bricht der Import ab, bleibt der Status stehen — der Tenant ist danach
+  erkennbar unvollständig, nicht heimlich halb gefüllt. Ein erneuter Import
+  verwirft den Rest und führt zum korrekten Endstand.
+- **Abgeschnittene Ströme fallen auf.** Der Export endet mit einer
+  Schlusszeile; fehlt sie, lehnt der Import ab.
+- **Geheimnisse werden neu verschlüsselt** — mit dem aktuellen Schlüssel
+  der Zieldatenbank. Ein Import ist damit nebenbei der Weg für einen
+  Schlüsselwechsel.
+- **Die Gegenwart gewinnt beim Geo.** Es gilt die Heimatregion des Ziels,
+  nicht die des Exports; bei mehreren Regionen ist `orm.WithGeo` Pflicht.
+  Sonst zerstreute jedes Zurückspielen die Daten wieder über die Regionen.
+- **Weiterschreiben geht nahtlos.** Events landen am Ende der Geo-Sequenz
+  der Zielregion; Read-Models werden aus ihnen neu projiziert.
+- **Fremde Schemastände werden abgelehnt**, nicht still eingespielt
+  (`ErrExportSchemaMismatch`) — bewusst zulassen mit
+  `orm.AllowSchemaDrift()`.
+
 Siehe auch [Geo-Partitionierung](/guides/geo/).

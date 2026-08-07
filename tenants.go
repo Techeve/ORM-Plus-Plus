@@ -15,7 +15,7 @@ import (
 type TenantInfo struct {
 	ID        ID
 	Name      string
-	Status    string // "active" | "archived"
+	Status    string // "active" | "archived" | "importing" (Import läuft oder brach ab)
 	CreatedAt time.Time
 }
 
@@ -44,8 +44,16 @@ func (t *TenantRegistry) bootstrap(ctx context.Context) error {
 	return t.reload(ctx)
 }
 
+// tenantSelect liefert Tenant-Zeilen samt abgeleitetem Status: ein
+// laufender oder abgebrochener Import überschreibt ihn mit "importing".
+const tenantSelect = `SELECT t.tenant_id, t.name,
+		CASE WHEN i.tenant_id IS NULL THEN t.status ELSE 'importing' END, t.created_at
+	FROM ormpp_tenants t LEFT JOIN ormpp_tenant_imports i ON i.tenant_id = t.tenant_id`
+
 func (t *TenantRegistry) reload(ctx context.Context) error {
-	rows, err := t.d.q().QueryContext(ctx, `SELECT tenant_id, status FROM ormpp_tenants`)
+	rows, err := t.d.q().QueryContext(ctx, `SELECT t.tenant_id,
+			CASE WHEN i.tenant_id IS NULL THEN t.status ELSE 'importing' END
+		FROM ormpp_tenants t LEFT JOIN ormpp_tenant_imports i ON i.tenant_id = t.tenant_id`)
 	if err != nil {
 		return err
 	}
@@ -73,10 +81,16 @@ func (t *TenantRegistry) verify(tenant ID) error {
 	t.mu.RLock()
 	status, ok := t.cache[tenant]
 	t.mu.RUnlock()
-	if !ok || status != "active" {
+	switch {
+	case ok && status == "active":
+		return nil
+	case ok && status == "importing":
+		// Ein abgebrochener Import lässt den Status stehen: der Tenant ist
+		// erkennbar unvollständig statt still halb gefüllt.
+		return fmt.Errorf("%w: %s", ErrImportIncomplete, tenant)
+	default:
 		return fmt.Errorf("%w: %s", ErrUnknownTenant, tenant)
 	}
-	return nil
 }
 
 // Create legt einen neuen Tenant an.
@@ -100,15 +114,13 @@ func (t *TenantRegistry) Create(ctx context.Context, info TenantInfo) (TenantInf
 
 // Get liest einen Tenant.
 func (t *TenantRegistry) Get(ctx context.Context, id ID) (TenantInfo, error) {
-	row := t.d.q().QueryRowContext(ctx,
-		`SELECT tenant_id, name, status, created_at FROM ormpp_tenants WHERE tenant_id = ?`, id.String())
+	row := t.d.q().QueryRowContext(ctx, tenantSelect+` WHERE t.tenant_id = ?`, id.String())
 	return scanTenant(row)
 }
 
 // List liefert alle Tenants.
 func (t *TenantRegistry) List(ctx context.Context) ([]TenantInfo, error) {
-	rows, err := t.d.q().QueryContext(ctx,
-		`SELECT tenant_id, name, status, created_at FROM ormpp_tenants ORDER BY created_at`)
+	rows, err := t.d.q().QueryContext(ctx, tenantSelect+` ORDER BY t.created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -156,10 +168,23 @@ func (t *TenantRegistry) Export(ctx context.Context, id ID, w io.Writer) error {
 		return err
 	}
 	enc := json.NewEncoder(w)
-	if err := enc.Encode(map[string]any{"type": "tenant", "data": info}); err != nil {
+	// Schemastand in die Kopfzeile: ohne ihn kann ein Import nicht wissen,
+	// von welchem Stand der Strom kommt (Zusatzfelder, alte Leser ignorieren
+	// sie). Modelle topologisch sortiert (Referenzziele zuerst), damit der
+	// Strom in seiner eigenen Reihenfolge importierbar ist.
+	if err := enc.Encode(map[string]any{
+		"type": "tenant", "data": info,
+		"schema_version": d.schemaVersion,
+		"models":         d.reg.checksum(),
+		"exported_at":    nowUTC().Format(time.RFC3339Nano),
+	}); err != nil {
 		return err
 	}
-	for _, m := range d.reg.ordered {
+	ordered, err := d.reg.sortedByDeps()
+	if err != nil {
+		return err
+	}
+	for _, m := range ordered {
 		if !m.tenanted() {
 			continue
 		}
@@ -175,7 +200,10 @@ func (t *TenantRegistry) Export(ctx context.Context, id ID, w io.Writer) error {
 			}
 		}
 	}
-	return nil
+	// Schlusszeile: ohne sie ist ein abgeschnittener Strom von einem
+	// vollständigen nicht zu unterscheiden — ein halb geschriebener
+	// Sicherungspunkt sähe beim Zurückspielen aus wie ein ganzer.
+	return enc.Encode(map[string]any{"type": "end"})
 }
 
 // exportRows schreibt die Zeilen eines Models (CRUD oder ES-Read-Model).
@@ -305,41 +333,10 @@ func (t *TenantRegistry) Purge(ctx context.Context, id ID) error {
 	}
 	tid := id.String()
 
-	// Löschreihenfolge: Abhängige vor Zielen (FK-sicher) — umgekehrte
-	// Topo-Sortierung der Registry.
-	ordered, err := d.reg.sortedByDeps()
-	if err != nil {
-		return err
-	}
 	err = d.Tx(ctx, func(tx Tx) error {
-		for i := len(ordered) - 1; i >= 0; i-- {
-			m := ordered[i]
-			if !m.tenanted() {
-				continue
-			}
-			tables := []string{m.table}
-			if m.kind == kindEventSourced {
-				tables = append(tables, esEventsTable(m), esArchiveTable(m), esSnapsTable(m))
-			}
-			for _, tbl := range tables {
-				if _, err := tx.q().ExecContext(ctx,
-					fmt.Sprintf("DELETE FROM %q WHERE tenant_id = ?", tbl), tid); err != nil {
-					return fmt.Errorf("orm: Purge %s: %w", tbl, err)
-				}
-			}
-		}
-		// Alt-Tabellen einer laufenden Migration (Dual-Write) mitbereinigen.
-		d.dwMu.Lock()
-		active := d.activeReplace
-		d.dwMu.Unlock()
-		for tbl, cr := range active {
-			if !cr.oldM.tenanted() {
-				continue
-			}
-			if _, err := tx.q().ExecContext(ctx,
-				fmt.Sprintf("DELETE FROM %q WHERE tenant_id = ?", tbl), tid); err != nil {
-				return fmt.Errorf("orm: Purge Alt-Tabelle %s: %w", tbl, err)
-			}
+		// Löschreihenfolge: Abhängige vor Zielen (FK-sicher).
+		if err := d.deleteTenantData(ctx, tx, id); err != nil {
+			return err
 		}
 		// Audit-Eintrag, dann die Tenant-Zeile selbst (Name ist personenbezogen).
 		if _, err := tx.q().ExecContext(ctx, `

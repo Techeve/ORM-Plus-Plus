@@ -5,7 +5,28 @@ Nach jedem abgeschlossenen Schritt wird diese Datei aktualisiert und committet �
 
 ## Aktueller Schritt
 
-**Phase 6 — Geo-Residenz physisch** (aus einem Anwenderbefund an v1.1.1: „die Region bleibt ein Etikett"). Abgeschlossen, siehe unten. Davor: **Phase 5 abgeschlossen** — alle v1-API-Flächen implementiert, keine Stubs mehr.
+**Phase 7 — `tenants.Import`** (aus einem Anwenderbefund an v1.2.0: „ohne Import ist der Export eine DSGVO-Auskunft, kein Backup"). Abgeschlossen, siehe unten. Davor: **Phase 6 — Geo-Residenz physisch** und **Phase 5** abgeschlossen.
+
+## Phase 7: Sicherung zurückspielen (`tenants.Import`)
+
+| # | Baustein | Status |
+|---|---|---|
+| 7.1 | `TenantRegistry.Import(ctx, id, r, opts…)` — Strom in Stapeln (`importBatch`), nie ganz im Speicher | ✅ |
+| 7.2 | Ersetzen statt Mischen: Ziel leer (`active`) oder `archived`; sonst `ErrTenantNotEmpty`. Marke `ormpp_tenant_imports` macht den Tenant während/nach Abbruch erkennbar unvollständig (`ErrImportIncomplete`), Wiederholen führt zum korrekten Endstand | ✅ |
+| 7.3 | Kopfzeile trägt `schema_version` + Modell-Prüfsumme, Schlusszeile `{"type":"end"}` erkennt abgeschnittene Ströme; Ablehnung mit `ErrExportSchemaMismatch`, bewusst zulassen via `AllowSchemaDrift()` | ✅ |
+| 7.4 | Verschlüsselte Felder werden mit dem **aktuellen** Schlüssel neu verschlüsselt (Import ist damit nebenbei der Weg für einen Schlüsselwechsel) | ✅ |
+| 7.5 | Geo: die Heimatregion des Ziels gewinnt (`WithGeo` Pflicht bei mehreren Regionen, `ErrNoGeo`) — sonst zerstreute jedes Zurückspielen die Daten wieder | ✅ |
+| 7.6 | Events ans Ende der Geo-Sequenz der Zielregion; Read-Models aus den importierten Events neu projiziert (`reprojectTenant`, keyset-paginiert) | ✅ |
+| 7.7 | Audit-Zeile `tenant-import` in `ormpp_schema_history`; `Purge` teilt sich den Löschpfad (`deleteTenantData`) | ✅ |
+| 7.8 | Nachweis: `import_test.go` (Round-Trip inkl. verschlüsseltem Feld, Weiterschreiben mit `WaitFor`, Abbruch + Wiederholung, voller Tenant, fremder Schemastand, Geo-Gegenwart) auf allen drei Backends | ✅ |
+
+### Phase-7-Notizen
+
+- **Der Zustand liegt in einer eigenen Tabelle, nicht im Tenant-Status.** `ormpp_tenants.status` hat einen `CHECK (status IN ('active','archived'))`; um „importing" zu ergänzen, müsste man die Tabelle auf jeder Bestandsanlage umbauen. `ormpp_tenant_imports` ist additiv, und `Get`/`List`/`reload` leiten den Status per LEFT JOIN ab. Der Tenant steht während des Imports zusätzlich auf `archived`, damit auch eine Instanz mit altem Cache nichts durchlässt.
+- **Die Schlusszeile ist der eigentliche Abbruch-Nachweis.** Ein an einer Zeilengrenze abgeschnittener JSON-Lines-Strom ist von einem vollständigen sonst nicht zu unterscheiden — ein halb geschriebener Sicherungspunkt sähe beim Zurückspielen aus wie ein ganzer. Nur Exporte ab v1.2.0 tragen sie; ältere sind auf Vollständigkeit nicht prüfbar (und werden ohne `AllowSchemaDrift` ohnehin abgelehnt).
+- **Read-Models werden nicht importiert, sondern projiziert.** Sie sind abgeleiteter Zustand; aus den Events neu gebaut sind sie garantiert konsistent, während übernommene Zeilen einen Stand behaupten könnten, den die Events nicht hergeben.
+- **Export ist jetzt topologisch sortiert** (`sortedByDeps`), damit der Strom in seiner eigenen Reihenfolge importierbar ist — sonst träfe eine Zeile ihr Referenzziel, bevor es existiert.
+- **Ereignisse gehen nicht verloren, dieselbe Mechanik wie beim Umzug:** importierte Events bekommen `seq` am Ende der Zielregion und liegen damit über jedem Checkpoint. Projektionen sehen sie als Nachzügler (at-least-once).
 
 ## Phase 6: Geo-Residenz physisch
 
