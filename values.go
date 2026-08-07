@@ -142,6 +142,18 @@ func decodeField(d *DB, f *field, target reflect.Value, raw any) error {
 		return json.Unmarshal(data, target.Addr().Interface())
 	}
 
+	// Leere Blobs zählen wie NULL: ALTER ADD COLUMN befüllt Bestandszeilen
+	// über das Blob-Zero-Literal ('\x' bzw. x'') mit einem leeren
+	// Nicht-NULL-Blob — der darf beim Lesen nicht am Ciphertext-Parser
+	// scheitern (Zero-Value statt Format-Fehler). Vor der Pointer-Behandlung,
+	// damit Pointer-Felder wie bei NULL nil bleiben.
+	if f.dk == dEncrypted {
+		if b, ok := raw.([]byte); ok && len(b) == 0 {
+			target.SetZero()
+			return nil
+		}
+	}
+
 	if target.Kind() == reflect.Pointer {
 		if raw == nil {
 			target.SetZero()
