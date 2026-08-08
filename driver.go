@@ -52,6 +52,10 @@ type dialect interface {
 	forUpdate() string
 	// dualWriteTriggerSQL erzeugt die Nachlauf-Trigger auf einer Alt-Tabelle.
 	dualWriteTriggerSQL(table, pk string) []string
+	// blobColumnSQL liefert die DDL, die eine Bestands-Spalte auf den
+	// Binärtyp der encrypted-Spalten bringt (EncryptFields) — nil, wenn
+	// nichts zu tun ist (Spalte schon binär; SQLite typisiert dynamisch).
+	blobColumnSQL(q queryer, table, col string) ([]string, error)
 	// partitionClause ist die PARTITION-BY-Klausel der Event-Tabellen
 	// ("" = Backend partitioniert nicht; SQLite kollabiert).
 	partitionClause() string

@@ -50,6 +50,7 @@ type field struct {
 	required   bool
 	deprecated bool
 	encrypted  bool
+	lookup     bool // encrypted + deterministische Index-Spalte (lookup.go)
 	enum       []string
 	defaultVal string
 	hasDefault bool
@@ -97,6 +98,10 @@ type model struct {
 	}
 	// updateFields: die Nicht-pk-/Nicht-immutable-Felder in SET-Reihenfolge.
 	updateFields []*field
+	// lookups: die encrypted,lookup-Felder (Index-Spalten in Schreibreihenfolge);
+	// updateLookups: davon die in Updates beschreibbaren (Feld nicht immutable).
+	lookups       []*field
+	updateLookups []*field
 }
 
 func (m *model) tenanted() bool { return !m.opts.tenantFree }
@@ -365,6 +370,8 @@ func parseField(sf reflect.StructField, tag string) (*field, error) {
 				}
 			case "encrypted":
 				f.encrypted = true
+			case "lookup":
+				f.lookup = true
 			default:
 				return nil, fmt.Errorf("unbekanntes Tag %q", key)
 			}
@@ -402,9 +409,15 @@ func parseField(sf reflect.StructField, tag string) (*field, error) {
 			return nil, fmt.Errorf("ref-Feld muss orm.ID oder *orm.ID sein")
 		}
 	}
+	if f.lookup && !f.encrypted {
+		return nil, fmt.Errorf("lookup setzt encrypted voraus (Blind-Index einer verschlüsselten Spalte)")
+	}
 	if f.encrypted {
-		if f.pk || f.indexed || f.unique || f.json || f.version || f.hasDefault || len(f.enum) > 0 || f.refModel != "" {
-			return nil, fmt.Errorf("encrypted ist nicht kombinierbar mit pk/index/unique/json/version/default/enum/ref (Ciphertext ist nicht vergleichbar)")
+		if f.pk || f.indexed || f.json || f.version || f.hasDefault || len(f.enum) > 0 || f.refModel != "" {
+			return nil, fmt.Errorf("encrypted ist nicht kombinierbar mit pk/index/json/version/default/enum/ref (Ciphertext ist nicht vergleichbar)")
+		}
+		if f.unique && !f.lookup {
+			return nil, fmt.Errorf("unique auf encrypted braucht lookup (Eindeutigkeit läuft über die Index-Spalte)")
 		}
 		base := f.goType
 		if base.Kind() == reflect.Pointer {
@@ -413,6 +426,9 @@ func parseField(sf reflect.StructField, tag string) (*field, error) {
 		isBytes := base.Kind() == reflect.Slice && base.Elem().Kind() == reflect.Uint8
 		if base.Kind() != reflect.String && !isBytes {
 			return nil, fmt.Errorf("encrypted nur auf string- oder []byte-Feldern")
+		}
+		if f.lookup && base.Kind() != reflect.String {
+			return nil, fmt.Errorf("lookup nur auf string-Feldern (normalisierter Gleichheits-Index)")
 		}
 	}
 	f.dk = decKindOf(f)
@@ -465,12 +481,22 @@ func (r *registry) resolve() error {
 
 // buildSQL baut die SQL-Gerüste eines Models genau einmal (bei resolve).
 // Spalten- und Werte-Reihenfolge sind der Vertrag zwischen diesem Cache
-// und prepareWrite: Felder in Deklarationsreihenfolge, dann tenant_id
-// (falls tenant-gebunden), geo, geo_replicas (falls GeoFlexible).
+// und prepareWrite: Felder in Deklarationsreihenfolge, dann die
+// Lookup-Index-Spalten, dann tenant_id (falls tenant-gebunden), geo,
+// geo_replicas (falls GeoFlexible).
 func (m *model) buildSQL() {
 	cols := make([]string, len(m.fields))
 	for i, f := range m.fields {
 		cols[i] = f.column
+	}
+	m.lookups, m.updateLookups = nil, nil
+	for _, f := range m.fields {
+		if f.lookup {
+			m.lookups = append(m.lookups, f)
+			if !f.pk && !f.immutable {
+				m.updateLookups = append(m.updateLookups, f)
+			}
+		}
 	}
 	if m.kind == kindEventSourced {
 		// ES-Read-Models: nur der Query-Pfad läuft hierüber.
@@ -480,6 +506,9 @@ func (m *model) buildSQL() {
 	m.sqlc.selectList = quoteAll(cols...)
 
 	insCols := append([]string{}, cols...)
+	for _, f := range m.lookups {
+		insCols = append(insCols, f.lookupColumn())
+	}
 	if m.tenanted() {
 		insCols = append(insCols, "tenant_id")
 	}
@@ -503,6 +532,11 @@ func (m *model) buildSQL() {
 		m.updateFields = append(m.updateFields, f)
 		sets = append(sets, fmt.Sprintf("%q = ?", f.column))
 		upserts = append(upserts, fmt.Sprintf("%q = excluded.%q", f.column, f.column))
+	}
+	for _, f := range m.updateLookups {
+		lc := f.lookupColumn()
+		sets = append(sets, fmt.Sprintf("%q = ?", lc))
+		upserts = append(upserts, fmt.Sprintf("%q = excluded.%q", lc, lc))
 	}
 	u := fmt.Sprintf("UPDATE %q SET %s WHERE %q = ?", m.table, strings.Join(sets, ", "), m.pk.column)
 	if m.tenanted() {
@@ -589,6 +623,11 @@ func (r *registry) checksum() string {
 			fmt.Fprintf(&b, "|f:%s:%s:%s:pk=%t:null=%t:json=%t:enum=%s:def=%s:ref=%s:od=%d:dep=%t:enc=%t",
 				f.name, f.column, f.goType.String(), f.pk, f.nullable, f.json,
 				strings.Join(f.enum, "|"), f.defaultVal, f.refModel, f.refOn, f.deprecated, f.encrypted)
+			if f.lookup {
+				// Bewusst nur als Suffix bei gesetztem Flag: Checksummen
+				// bestehender Modelle ohne lookup bleiben unverändert.
+				b.WriteString(":lookup")
+			}
 		}
 		lines = append(lines, b.String())
 	}

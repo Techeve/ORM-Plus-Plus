@@ -63,6 +63,10 @@ func (sqliteDialect) columnType(k colKind) string {
 	}
 }
 
+// blobColumnSQL: SQLite typisiert dynamisch — BLOB-Werte lassen sich ohne
+// DDL in jede Spalte schreiben, die Typaffinität ist nur ein Hinweis.
+func (sqliteDialect) blobColumnSQL(queryer, string, string) ([]string, error) { return nil, nil }
+
 func (sqliteDialect) zeroLiteral(k colKind) string {
 	switch k {
 	case kInt, kBool, kFloat:

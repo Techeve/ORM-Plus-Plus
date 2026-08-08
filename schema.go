@@ -43,6 +43,26 @@ func (d *DB) applySchema(ctx context.Context) error {
 					}
 				}
 			}
+			// Nachträglich deklarierte lookup-Felder: Index-Spalte (nullable —
+			// Bestandszeilen füllt EncryptFields bzw. der nächste Schreibzugriff)
+			// und Index additiv nachziehen.
+			for _, f := range m.fields {
+				if !f.lookup {
+					continue
+				}
+				lc := f.lookupColumn()
+				if !have[lc] {
+					stmt := fmt.Sprintf("ALTER TABLE %q ADD COLUMN %q %s", m.table, lc, d.dial.columnType(kBlob))
+					if err := d.execDDL(ctx, stmt); err != nil {
+						return fmt.Errorf("orm: Lookup-Spalte %s.%s ergänzen: %w", m.table, lc, err)
+					}
+				}
+				for _, stmt := range lookupIndexStmts(m, f, d.partModel(m), true) {
+					if err := d.execDDL(ctx, stmt); err != nil {
+						return fmt.Errorf("orm: Lookup-Index auf %s.%s: %w", m.table, lc, err)
+					}
+				}
+			}
 		}
 		if m.kind == kindEventSourced {
 			if err := d.ensureESTables(ctx, m); err != nil {
@@ -138,6 +158,12 @@ func createTableSQL(d *DB, m *model) []string {
 		}
 		cols = append(cols, ddl)
 	}
+	for _, f := range m.fields {
+		if f.lookup {
+			// Blind-Index-Spalte (nullable: leerer Klartext → NULL).
+			cols = append(cols, fmt.Sprintf("%q %s", f.lookupColumn(), dial.columnType(kBlob)))
+		}
+	}
 	if m.tenanted() {
 		// FK von partitionierter Tabelle auf normale Tabelle ist erlaubt —
 		// der Tenant-FK bleibt in beiden Formen erhalten.
@@ -183,6 +209,10 @@ func indexStmts(m *model, part bool) []string {
 	var stmts []string
 	for _, f := range m.fields {
 		switch {
+		case f.lookup:
+			// unique wie index laufen über die Blind-Index-Spalte —
+			// die Ciphertext-Spalte selbst bleibt indexfrei.
+			stmts = append(stmts, lookupIndexStmts(m, f, part, false)...)
 		case f.unique:
 			stmts = append(stmts, uniqueIndexSQL(m, []string{f.column}, part))
 		case f.indexed:
@@ -351,10 +381,41 @@ func uniqueIndexSQL(m *model, cols []string, part bool) string {
 		fmt.Sprintf("ux_%s_%s", m.table, strings.Join(cols, "_")), m.table, quoteAll(full...))
 }
 
+// lookupIndexStmts erzeugt die Index-DDL einer Blind-Index-Spalte —
+// unique gemäß Feld-Tag, additiv (Migrate auf Bestandstabellen) mit
+// IF NOT EXISTS statt Neuanlage.
+func lookupIndexStmts(m *model, f *field, part, additive bool) []string {
+	lc := f.lookupColumn()
+	ine := ""
+	if additive {
+		ine = "IF NOT EXISTS "
+	}
+	if f.unique {
+		full := []string{lc}
+		if m.tenanted() {
+			full = append([]string{"tenant_id"}, full...)
+		}
+		if part {
+			full = append(full, "geo")
+		}
+		return []string{fmt.Sprintf("CREATE UNIQUE INDEX %s%q ON %q (%s)",
+			ine, fmt.Sprintf("ux_%s_%s", m.table, lc), m.table, quoteAll(full...))}
+	}
+	return []string{fmt.Sprintf("CREATE INDEX %s%q ON %q (%s)",
+		ine, fmt.Sprintf("ix_%s_%s", m.table, lc), m.table, quoteAll(lc))}
+}
+
+// columnsOf bildet Feldnamen auf ihre Query-Spalten ab — bei lookup-Feldern
+// die Index-Spalte (Model-Uniques/-Indizes vergleichen den Blind-Index).
 func columnsOf(m *model, fieldNames []string) []string {
 	cols := make([]string, len(fieldNames))
 	for i, fn := range fieldNames {
-		cols[i] = m.fieldByName(fn).column
+		f := m.fieldByName(fn)
+		if f.lookup {
+			cols[i] = f.lookupColumn()
+		} else {
+			cols[i] = f.column
+		}
 	}
 	return cols
 }

@@ -251,6 +251,16 @@ func rawString(raw any) (string, bool) {
 	return "", false
 }
 
+func rawBytes(raw any) ([]byte, bool) {
+	switch v := raw.(type) {
+	case []byte:
+		return v, true
+	case string:
+		return []byte(v), true
+	}
+	return nil, false
+}
+
 func rawInt(raw any) (int64, bool) {
 	switch v := raw.(type) {
 	case int64:

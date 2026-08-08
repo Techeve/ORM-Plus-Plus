@@ -323,6 +323,7 @@ type ProviderAccount struct {
 | `enum=a\|b\|c` | Wertemenge für String-Felder: CHECK-Constraint wo nativ, engine-seitig geprüft überall — ungültiger Wert ⇒ `orm.ErrInvalidValue` |
 | `default=…` | Default-Wert, wenn das Feld beim Insert den Zero-Value hat (nicht kombinierbar mit `required`) |
 | `encrypted` | Feld wird verschlüsselt gespeichert (Abschnitt 5.5) |
+| `lookup` | Blind-Index zu einem `encrypted`-Feld: Gleichheits-Queries und `unique` trotz Verschlüsselung (Abschnitt 5.5) |
 | `immutable` | Write-once: wird beim Insert gesetzt, danach unveränderlich — die Engine nimmt das Feld in kein `UPDATE` auf (gleiches Verhalten wie `tenant_id`) |
 | `required` | Muss beim Insert explizit gesetzt sein: Zero-Value ⇒ `orm.ErrRequiredField` |
 | `deprecated` | Feld ist zur Entfernung markiert (Expand/Contract, Abschnitt 8) |
@@ -401,10 +402,29 @@ db, err := orm.Open(orm.Postgres(dsn),
 **Regeln:**
 
 - `orm.Encryption(provider)` ist eine `Open`-Option; ohne sie schlägt `Migrate` bei Modellen mit `encrypted`-Feldern fehl. `orm.StaticKey([]byte)` (32 Bytes) ist der einfachste Provider; das `orm.KeyProvider`-Interface (aktueller Schlüssel + Lookup per Key-ID) ist von Tag 1 rotationsfähig — jeder Ciphertext trägt die ID des benutzten Schlüssels, Rotation erfolgt lazy beim nächsten Schreiben.
-- `encrypted` gilt für `string`- und `[]byte`-Felder (auch Pointer) und ist nicht kombinierbar mit `pk`/`index`/`unique`/`json`/`version`/`default`/`enum`/`ref`.
-- Verschlüsselte Felder sind **nicht indizierbar, nicht filterbar und nicht sortierbar** (`Where`/`OrderBy` auf ein `encrypted`-Feld ⇒ Query-Fehler) — die DB kann Ciphertext nicht sinnvoll vergleichen. `UpdateSet` verschlüsselt engine-seitig.
+- `encrypted` gilt für `string`- und `[]byte`-Felder (auch Pointer) und ist nicht kombinierbar mit `pk`/`index`/`json`/`version`/`default`/`enum`/`ref`; `unique` geht nur zusammen mit `lookup` (unten).
+- Verschlüsselte Felder sind **nicht indizierbar, nicht filterbar und nicht sortierbar** (`Where`/`OrderBy` auf ein `encrypted`-Feld ⇒ Query-Fehler) — die DB kann Ciphertext nicht sinnvoll vergleichen. `UpdateSet` verschlüsselt engine-seitig. Ausnahme: `lookup`-Felder erlauben Gleichheit (unten).
 - **Leere Zellen:** `NULL` und der leere Blob dekodieren beide als Zero-Value (Pointer bleiben `nil`). Das trägt insbesondere nachträglich per `Migrate` ergänzte `encrypted`-Spalten: `ALTER ADD COLUMN` befüllt Bestandszeilen mit dem leeren Blob-Zero-Literal, und die bleiben lesbar, bis der nächste Schreibzugriff echten Ciphertext ablegt (seit v1.3.1).
 - **v1-Umfang:** `encrypted` wirkt auf CRUD-Modellen. Auf EventSourced-Modellen (Event-Payloads, Snapshots) wird es aktuell bei `Migrate` abgelehnt und folgt in einer späteren Version.
+
+**Lookup-fähige Verschlüsselung (`encrypted,lookup`, seit v1.4.0):** Felder, die als Login- oder Suchschlüssel dienen (E-Mail, Benutzername), brauchen Gleichheit trotz Verschlüsselung. Mit dem Zusatz-Tag `lookup` pflegt die Engine neben der Ciphertext-Spalte eine deterministische Index-Spalte `<spalte>_lookup` — einen Blind-Index.
+
+```go
+type Identity struct {
+    ID    orm.ID `orm:"pk"`
+    Email string `orm:"encrypted,lookup,unique"`
+}
+
+ident, err := orm.Query[Identity](db, ctx).Where(orm.Eq("Email", eingabe)).First()
+```
+
+- **Mechanik:** Der Index ist HMAC-SHA-256 über den normalisierten Klartext; der Index-Schlüssel wird per HKDF-SHA-256 mit fester Ableitungs-Kennung aus dem aktuellen Hauptschlüssel abgeleitet. Die DB sieht Ciphertext plus 32-Byte-HMAC, nie den Klartext. Bewusster Trade-off eines Blind-Index: *Gleichheits-Muster* sind der DB sichtbar (gleiche Werte → gleicher Index), die Werte nicht.
+- **Normalisierung:** `strings.ToLower` + `TrimSpace` — für gespeicherte Werte wie für Query-Parameter. Gleichheit gilt also case-insensitiv und ohne Randleerraum. `lookup` gibt es nur auf `string`-Feldern.
+- **Queries:** `Eq`/`Ne`/`In` (und `IsNull`/`NotNull`) übersetzt die Engine transparent auf die Index-Spalte. `Like`, Ordnungsvergleiche (`Gt` …) und `OrderBy` bleiben ausgeschlossen — der Index kennt nur Gleichheit.
+- **`unique`** wirkt auf der Index-Spalte (pro Tenant, wie jeder Unique): gleiche Klartexte in unterschiedlicher Schreibweise kollidieren. Auch Model-Uniques/-Indizes (`orm.Unique(...)`, `orm.Index(...)`), die ein `lookup`-Feld nennen, laufen über die Index-Spalte.
+- **Leere Werte** liegen als `NULL` im Index (kollidieren nie); `Eq(feld, "")` findet sie über `IS NULL`.
+- **Rotation:** Der Index-Schlüssel hängt am Hauptschlüssel — es gilt die Lazy-Strategie der Ciphertexte: Bestandszeilen behalten ihren alten Index bis zum nächsten Schreiben; bis dahin findet eine Gleichheits-Query (die mit dem aktuellen Schlüssel hasht) sie nicht. `tenants.Export` enthält den Klartext, nie den Index; `tenants.Import` berechnet Indizes grundsätzlich mit dem Schlüssel der Zielanlage neu — ein Export/Import-Roundtrip ist damit der Weg, nach einem Schlüsselwechsel alle Indizes nachzuziehen.
+- **Nachrüsten:** Ein `lookup`-Tag auf einer Bestandstabelle ergänzt `Migrate` additiv (Spalte + Index, `IF NOT EXISTS`); die Indizes der Bestandszeilen füllt `orm.EncryptFields` (Abschnitt 8.1) oder der nächste Schreibzugriff.
 
 ---
 
@@ -758,6 +778,7 @@ orm.MigrationTo(db, 3,     // Schritte von 2 nach 3; ältere MigrationTo bleiben
     orm.ReplaceModel[ZoneV2, DNSZone](func(ctx context.Context, old ZoneV2) (DNSZone, error) {
         return DNSZone{ /* Umbau */ }, nil
     }),
+    orm.EncryptFields[User]("PasswordHash", "Email"), // Klartext-Spalten in-place verschlüsseln
     orm.BatchScript("normalize-records", func(ctx context.Context, b orm.Batch) error {
         // b liefert Zeilen häppchenweise; Checkpoint verwaltet die Engine
         return nil
@@ -770,6 +791,7 @@ orm.MigrationTo(db, 3,     // Schritte von 2 nach 3; ältere MigrationTo bleiben
 - **Drift-Schutz:** Modelle geändert ohne Versions-Erhöhung ⇒ Startfehler (Checksum-Vergleich).
 - **`ReplaceModel`-Konventionen:** Der Go-Name des Alt-Structs ist der frühere Model-Name mit Versions-Suffix — `ZoneV2` liest die Tabelle des früheren Models `Zone` (Suffix `V<n>` wird für die Tabellen-Ableitung gestrichen). Tenant, Geo und — sofern die Transformation keine setzt — die ID bleiben über den Umbau erhalten. `required`/`enum`-Constraints des Ziel-Models gelten auch im Backfill. Ziel muss ein CRUD-Model sein (ES-Umbauten laufen über Events/Upcaster).
 - **`BatchScript`-Checkpoint:** Das Skript arbeitet mit den normalen ORM-APIs und sichert seinen Fortschritt über `b.Checkpoint(ctx)` / `b.SaveCheckpoint(ctx, key, rowsDone)` — bei Wiederaufnahme (Absturz, Neustart) liest es den Schlüssel zurück und setzt dort fort. Erfolgreiche Rückkehr markiert den Schritt als erledigt.
+- **`orm.EncryptFields[T](felder…)` (seit v1.4.0):** In-Place-Nachverschlüsselung bestehender Klartext-Spalten — keine Doppel-Felder, kein eigener Umzugs-Code. Voraussetzung: Das Model trägt zum Zeitpunkt der Migration bereits das `encrypted`-Tag auf den genannten Feldern. Der Schritt liest die Spalten **unter** der Model-Schicht (Klartext-Zeilen würden am Ciphertext-Parser scheitern) und schreibt sie mit dem aktuellen Schlüssel zurück; der Spaltentyp wandert in der expanding-Phase auf `BYTEA` (`ALTER … TYPE BYTEA USING convert_to(…)`, auf SQLite entfällt das). Am Ciphertext-Versionsbyte ist erkennbar, welche Zeilen schon umgezogen sind: der Schritt ist **idempotent** (gültiger Ciphertext wird nie neu verschlüsselt — kein Nonce-Wechsel) und **checkpointfähig** (Abbruch setzt beim letzten gesicherten Primärschlüssel wieder auf; `BatchSize`/`Throttle` aus dem `MigrationPlan` gelten). Er läuft über die ganze Tabelle, also über alle Mandanten einschließlich `SingleTenant`. `lookup`-Felder werden mitgezogen: ihre Index-Spalte wird beim Umzug befüllt, auch für Zeilen, die schon Ciphertext tragen. Während des Umzugs sollten keine Alt-Instanzen auf die betroffenen Spalten schreiben (der Typwechsel setzt ohnehin ein Wartungsfenster für diese Felder voraus).
 
 ### 8.2 Ausführung
 
