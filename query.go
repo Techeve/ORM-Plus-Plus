@@ -186,11 +186,20 @@ func (q *queryBuilder[T]) column(fieldName string) (string, error) {
 func (q *queryBuilder[T]) condSQL(c Cond) (string, []any, error) {
 	switch c.op {
 	case "cmp", "like", "in", "null", "notnull":
+		f := q.r.m.fieldByName(c.field)
+		if f == nil {
+			return "", nil, fmt.Errorf("orm: %s: unbekanntes Feld %q in Query", q.r.m.name, c.field)
+		}
+		// Lookup-Felder: Gleichheit läuft transparent über die
+		// deterministische Index-Spalte; alles Weitere bleibt
+		// ausgeschlossen (Ciphertext ist nicht vergleichbar).
+		if f.lookup {
+			return q.lookupCondSQL(f, c)
+		}
 		col, err := q.column(c.field)
 		if err != nil {
 			return "", nil, err
 		}
-		f := q.r.m.fieldByName(c.field)
 		switch c.op {
 		case "cmp":
 			v, err := encodeQueryValue(f, c.value)
@@ -246,6 +255,72 @@ func (q *queryBuilder[T]) condSQL(c Cond) (string, []any, error) {
 		return "NOT (" + p + ")", a, nil
 	default:
 		return "", nil, fmt.Errorf("orm: unbekannter Bedingungstyp %q", c.op)
+	}
+}
+
+// lookupCondSQL übersetzt eine Bedingung auf einem encrypted,lookup-Feld
+// auf die Index-Spalte: Eq/Ne/In hashen den Klartext-Parameter, IsNull/
+// NotNull spiegeln die Wert-Existenz. Like, Ordnungsvergleiche und OrderBy
+// bleiben ausgeschlossen — der Index kennt nur Gleichheit.
+func (q *queryBuilder[T]) lookupCondSQL(f *field, c Cond) (string, []any, error) {
+	d := q.r.h.db()
+	col := f.lookupColumn()
+	switch c.op {
+	case "cmp":
+		if c.cmp != "=" && c.cmp != "<>" {
+			return "", nil, fmt.Errorf("orm: %s.%s ist encrypted,lookup — nur Gleichheit (Eq/Ne/In), nicht %q",
+				q.r.m.name, f.name, c.cmp)
+		}
+		v, err := lookupQueryValue(d, q.r.m, f, c.value)
+		if err != nil {
+			return "", nil, err
+		}
+		if v == nil {
+			// Leerer Klartext liegt als NULL im Index — Gleichheit über IS NULL.
+			if c.cmp == "=" {
+				return fmt.Sprintf("%q IS NULL", col), nil, nil
+			}
+			return fmt.Sprintf("%q IS NOT NULL", col), nil, nil
+		}
+		return fmt.Sprintf("%q %s ?", col, c.cmp), []any{v}, nil
+	case "in":
+		if len(c.values) == 0 {
+			return "1 = 0", nil, nil
+		}
+		ph := make([]string, 0, len(c.values))
+		args := make([]any, 0, len(c.values))
+		hasNull := false
+		for _, raw := range c.values {
+			v, err := lookupQueryValue(d, q.r.m, f, raw)
+			if err != nil {
+				return "", nil, err
+			}
+			if v == nil {
+				hasNull = true
+				continue
+			}
+			ph = append(ph, "?")
+			args = append(args, v)
+		}
+		expr := ""
+		if len(ph) > 0 {
+			expr = fmt.Sprintf("%q IN (%s)", col, strings.Join(ph, ", "))
+		}
+		if hasNull {
+			null := fmt.Sprintf("%q IS NULL", col)
+			if expr == "" {
+				return null, nil, nil
+			}
+			return "(" + expr + " OR " + null + ")", args, nil
+		}
+		return expr, args, nil
+	case "null":
+		return fmt.Sprintf("%q IS NULL", col), nil, nil
+	case "notnull":
+		return fmt.Sprintf("%q IS NOT NULL", col), nil, nil
+	default: // like
+		return "", nil, fmt.Errorf("orm: %s.%s ist encrypted,lookup — nur Gleichheit (Eq/Ne/In), kein LIKE",
+			q.r.m.name, f.name)
 	}
 }
 
@@ -361,6 +436,14 @@ func (q *queryBuilder[T]) UpdateSet(sets ...Assignment) (int64, error) {
 			}
 			assigns = append(assigns, fmt.Sprintf("%q = ?", f.column))
 			vals = append(vals, v)
+			if f.lookup {
+				lv, err := encodeLookup(q.r.h.db(), f, sv)
+				if err != nil {
+					return 0, err
+				}
+				assigns = append(assigns, fmt.Sprintf("%q = ?", f.lookupColumn()))
+				vals = append(vals, lv)
+			}
 			continue
 		}
 		if len(f.enum) > 0 {

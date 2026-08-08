@@ -104,6 +104,13 @@ func (r *repo[T]) prepareWrite(ctx context.Context, e *T, tenant ID, geo string)
 		}
 		vals = append(vals, v)
 	}
+	for _, f := range r.m.lookups {
+		v, err := encodeLookup(d, f, rv.FieldByIndex(f.index))
+		if err != nil {
+			return nil, err
+		}
+		vals = append(vals, v)
+	}
 	if r.m.tenanted() {
 		if err := d.tenants.verify(tenant); err != nil {
 			return nil, err
@@ -204,14 +211,23 @@ check:
 		conds := make([]string, 0, len(set)+2)
 		args := make([]any, 0, len(set)+2)
 		for _, f := range set {
-			v, err := encodeField(d, f, rv.FieldByIndex(f.index))
+			// Lookup-Felder vergleichen über die deterministische
+			// Index-Spalte — der Ciphertext selbst ist nie gleich.
+			col, v := f.column, any(nil)
+			var err error
+			if f.lookup {
+				col = f.lookupColumn()
+				v, err = encodeLookup(d, f, rv.FieldByIndex(f.index))
+			} else {
+				v, err = encodeField(d, f, rv.FieldByIndex(f.index))
+			}
 			if err != nil {
 				return err
 			}
 			if v == nil {
 				continue check // NULL kollidiert per SQL-Semantik nie
 			}
-			conds = append(conds, fmt.Sprintf("%q = ?", f.column))
+			conds = append(conds, fmt.Sprintf("%q = ?", col))
 			args = append(args, v)
 		}
 		if r.m.tenanted() {
@@ -360,6 +376,13 @@ func (r *repo[T]) Update(ctx context.Context, e *T) error {
 		}
 		vals = append(vals, v)
 	}
+	for _, f := range r.m.updateLookups {
+		v, err := encodeLookup(r.h.db(), f, rv.FieldByIndex(f.index))
+		if err != nil {
+			return err
+		}
+		vals = append(vals, v)
+	}
 
 	vals = append(vals, pk.String())
 	if r.m.tenanted() {
@@ -418,6 +441,13 @@ func (r *repo[T]) Upsert(ctx context.Context, e *T) error {
 		uvals := make([]any, 0, len(r.m.updateFields)+2)
 		for _, f := range r.m.updateFields {
 			v, err := encodeField(d, f, rv.FieldByIndex(f.index))
+			if err != nil {
+				return err
+			}
+			uvals = append(uvals, v)
+		}
+		for _, f := range r.m.updateLookups {
+			v, err := encodeLookup(d, f, rv.FieldByIndex(f.index))
 			if err != nil {
 				return err
 			}

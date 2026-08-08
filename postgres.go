@@ -88,6 +88,25 @@ func (pgDialect) columnType(k colKind) string {
 	}
 }
 
+// blobColumnSQL bringt eine Klartext-Spalte auf BYTEA (EncryptFields).
+// TEXT-Inhalte werden dabei zu ihren UTF-8-Bytes — der Backfill erkennt
+// sie am fehlenden Ciphertext-Versionsbyte als noch unverschlüsselt.
+// Der Rewrite läuft auch auf YugabyteDB (2024.1+); parallele Schreiber
+// sind während der Backfill-Phase per Migrations-Lease ausgeschlossen.
+func (pgDialect) blobColumnSQL(q queryer, table, col string) ([]string, error) {
+	var udt string
+	err := q.QueryRowContext(bgCtx(), `SELECT udt_name FROM information_schema.columns
+		WHERE table_name = ? AND column_name = ? AND table_schema = current_schema()`, table, col).Scan(&udt)
+	if err != nil {
+		return nil, fmt.Errorf("orm: Spaltentyp %s.%s lesen: %w", table, col, err)
+	}
+	if udt == "bytea" {
+		return nil, nil
+	}
+	return []string{fmt.Sprintf(
+		`ALTER TABLE %q ALTER COLUMN %q TYPE BYTEA USING convert_to(%q, 'UTF8')`, table, col, col)}, nil
+}
+
 func (pgDialect) zeroLiteral(k colKind) string {
 	switch k {
 	case kInt, kBool, kFloat:

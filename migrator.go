@@ -79,6 +79,7 @@ func (d *DB) setPhase(ctx context.Context, st *schemaState, phase string) error 
 type versionSteps struct {
 	version  int
 	replaces []*compiledReplace
+	encrypts []*compiledEncrypt
 	scripts  []*batchScript
 }
 
@@ -95,6 +96,12 @@ func (d *DB) compileSteps(from, to int) ([]versionSteps, error) {
 					return nil, err
 				}
 				vs.replaces = append(vs.replaces, cr)
+			case *encryptFieldsStep:
+				ce, err := d.compileEncrypt(step)
+				if err != nil {
+					return nil, err
+				}
+				vs.encrypts = append(vs.encrypts, ce)
 			case *batchScript:
 				vs.scripts = append(vs.scripts, step)
 			default:
@@ -185,6 +192,11 @@ func (d *DB) runUpgrade(ctx context.Context, st schemaState, plan MigrationPlan)
 				return err
 			}
 		}
+		for _, ce := range vs.encrypts {
+			if err := d.convertEncryptColumns(ctx, ce); err != nil {
+				return err
+			}
+		}
 	}
 	if st.phase == phaseExpanding {
 		if err := d.setPhase(ctx, &st, phaseBackfill); err != nil {
@@ -197,6 +209,11 @@ func (d *DB) runUpgrade(ctx context.Context, st schemaState, plan MigrationPlan)
 		for _, vs := range pending {
 			for _, cr := range vs.replaces {
 				if err := d.backfillReplace(ctx, vs.version, cr, plan); err != nil {
+					return err
+				}
+			}
+			for _, ce := range vs.encrypts {
+				if err := d.backfillEncrypt(ctx, vs.version, ce, plan); err != nil {
 					return err
 				}
 			}
@@ -335,6 +352,14 @@ func (d *DB) transformAndUpsert(ctx context.Context, q queryer, cr *compiledRepl
 			return err
 		}
 		cols = append(cols, f.column)
+		vals = append(vals, v)
+	}
+	for _, f := range m.lookups {
+		v, err := encodeLookup(d, f, rv.FieldByIndex(f.index))
+		if err != nil {
+			return err
+		}
+		cols = append(cols, f.lookupColumn())
 		vals = append(vals, v)
 	}
 	if m.tenanted() {

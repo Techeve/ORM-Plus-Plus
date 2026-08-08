@@ -321,6 +321,17 @@ func (d *DB) importRow(m *model, raw json.RawMessage, tenant ID, geo, replicas s
 		cols = append(cols, f.column)
 		vals = append(vals, v)
 	}
+	// Lookup-Indizes sind abgeleitete Daten: beim Import mit dem AKTUELLEN
+	// Schlüssel neu berechnen — ein Import ist damit nebenbei der Weg, die
+	// Indizes nach einem Schlüsselwechsel nachzuziehen.
+	for _, f := range m.lookups {
+		v, err := encodeLookup(d, f, rv.FieldByIndex(f.index))
+		if err != nil {
+			return pendingRow{}, fmt.Errorf("orm: Import: Zeile %s.%s (lookup): %w", m.name, f.name, err)
+		}
+		cols = append(cols, f.lookupColumn())
+		vals = append(vals, v)
+	}
 	cols = append(cols, "tenant_id", "geo")
 	vals = append(vals, tenant.String(), geo)
 	if m.opts.geoMode == geoFlexible {
