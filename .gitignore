@@ -2,6 +2,7 @@
 .idea/
 .vscode/
 .junie/
+.claude/
 
 # Build & Test
 /bin/
