@@ -82,6 +82,11 @@ type dialect interface {
 	incomingFKs(q queryer, table string) ([][2]string, error)
 	// tableIndexes liefert die Indexnamen einer Tabelle (inkl. PK-Index).
 	tableIndexes(q queryer, table string) ([]string, error)
+	// lockGeoSeq serialisiert die Vergabe der Geo-Sequenz eines Event-Logs
+	// bis zum Ende der laufenden Transaktion. Ohne das lesen zwei parallele
+	// Appends dasselbe MAX(seq) und kollidieren auf dem Unique-Index.
+	// SQLite meldet nil: Der Single-Writer serialisiert bereits.
+	lockGeoSeq(ctx ctxType, q queryer, table, geo string) error
 }
 
 // regionPlacement bindet eine Region an ihren physischen Standort — auf
