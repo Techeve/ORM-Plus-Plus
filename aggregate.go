@@ -295,16 +295,22 @@ func (a *Aggregate) Append(ctx context.Context, payloads ...any) (Position, erro
 		case nil:
 			geo = homeGeo
 		case sql.ErrNoRows:
-			// Neues Aggregat: Geo-Sequenz für das Context-Geo holen.
-			cur = 0
-			if err := q.QueryRowContext(ctx, m.es.sqlGeoSeq, geo).Scan(&geoSeq); err != nil {
-				return err
-			}
+			cur = 0 // neues Aggregat, Geo bleibt das aus dem Context
 		default:
 			return err
 		}
 		if cur > a.version {
 			return ErrVersionConflict
+		}
+		// Vergabe der Geo-Sequenz serialisieren und danach NEU lesen: Der
+		// Wert oben stammt von vor der Sperre, in der Zwischenzeit kann ein
+		// anderer Append committet haben. Erst hier steht das Geo fest —
+		// bei einem bestehenden Aggregat gewinnt sein Heimat-Geo.
+		if err := d.dial.lockGeoSeq(ctx, q, ev, geo); err != nil {
+			return err
+		}
+		if err := q.QueryRowContext(ctx, m.es.sqlGeoSeq, geo).Scan(&geoSeq); err != nil {
+			return err
 		}
 		for i, st := range sts {
 			full := m.es.fullType(st.decl.name, st.decl.version)
@@ -501,6 +507,15 @@ func (a *Aggregate) History(ctx context.Context) iter.Seq2[CloudEvent, error] {
 	}
 }
 
+// violatesIndex erkennt eine Constraint-Verletzung des Event-Logs am Namen.
+//
+// Bei Geo-Partitionierung meldet PG/YB den Index der PARTITION
+// (conversation_events_geo_default_pkey), nicht den der Elterntabelle
+// (conversation_events_pkey) — beide tragen aber Tabellennamen und Marker.
+func violatesIndex(msg, eventsTable, marker string) bool {
+	return strings.Contains(msg, eventsTable) && strings.Contains(msg, marker)
+}
+
 // classifyAppendErr mappt eine PK-Verletzung des Event-Logs (paralleler
 // Append auf dasselbe Aggregat) auf ErrVersionConflict.
 func classifyAppendErr(err error, eventsTable string) error {
@@ -508,7 +523,7 @@ func classifyAppendErr(err error, eventsTable string) error {
 		return nil
 	}
 	msg := err.Error()
-	if strings.Contains(msg, eventsTable+"_pkey") || strings.Contains(msg, eventsTable+".aggregate_id") {
+	if violatesIndex(msg, eventsTable, "_pkey") || strings.Contains(msg, eventsTable+".aggregate_id") {
 		return ErrVersionConflict
 	}
 	return err
@@ -518,7 +533,7 @@ func classifyAppendErr(err error, eventsTable string) error {
 // zwei parallele Appends verschiedener Aggregate; wiederholbar.
 func isSeqCollision(err error, eventsTable string) bool {
 	msg := err.Error()
-	return strings.Contains(msg, "ux_"+eventsTable+"_geo_seq") || strings.Contains(msg, eventsTable+".geo")
+	return violatesIndex(msg, eventsTable, "geo_seq") || strings.Contains(msg, eventsTable+".geo")
 }
 
 // fetchEventRows liest eine Ergebnismenge vollständig ein und schließt den Cursor.

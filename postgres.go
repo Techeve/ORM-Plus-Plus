@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"time"
 
@@ -285,6 +286,32 @@ func (pgDialect) tableIndexes(q queryer, table string) ([]string, error) {
 		names = append(names, n)
 	}
 	return names, rows.Err()
+}
+
+// lockGeoSeq nimmt eine Advisory-Sperre auf (Tabelle, Geo) bis zum Ende der
+// laufenden Transaktion.
+//
+// Nötig, weil die Sequenz als MAX(seq)+1 vergeben wird: Ohne Sperre lesen
+// zwei parallele Appends denselben Wert und der zweite scheitert am
+// Unique-Index. Eine Wiederholung fängt das nur außerhalb einer fremden
+// Transaktion auf — innerhalb einer solchen kann ORM++ nicht neu starten,
+// und der Fehler schlüge bis zum Aufrufer durch. Advisory statt Zeilensperre,
+// weil es keine Zeile gibt, die man sperren könnte: Der erste Append einer
+// Region findet die Tabelle leer vor.
+func (pgDialect) lockGeoSeq(ctx ctxType, q queryer, table, geo string) error {
+	_, err := q.ExecContext(ctx, `SELECT pg_advisory_xact_lock(?)`, advisoryKey(table, geo))
+	return err
+}
+
+// advisoryKey bildet (Tabelle, Geo) auf den bigint-Schlüssel der
+// Advisory-Sperre ab. Eine Kollision zweier Paare serialisiert unnötig,
+// bleibt aber korrekt.
+func advisoryKey(table, geo string) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(table))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(geo))
+	return int64(h.Sum64())
 }
 
 func tablespaceClause(placement string) string {

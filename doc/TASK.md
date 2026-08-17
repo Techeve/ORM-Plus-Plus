@@ -143,7 +143,7 @@ Overhead vs. Roh-SQL (innerhalb desselben Laufs gemessen — die robuste Metrik;
 | 4.2 | Dialekt-Erweiterung: `rebind` (?→$n), `columnType`/`zeroLiteral` (BIGINT/JSONB/BYTEA/DOUBLE), `autoPK`, `limitAll`, `forUpdate`, Trigger-DDL | ✅ |
 | 4.3 | Alle Engine-Statements durch den Rebind-Wrapper (`dialq`) geroutet — ein Codepfad, zwei Platzhalter-Stile | ✅ |
 | 4.4 | `GetForUpdate` nativ (`SELECT … FOR UPDATE` auf PG/YB; SQLite emuliert weiter) | ✅ |
-| 4.5 | Append unter echter Nebenläufigkeit: PK-Verletzung → `ErrVersionConflict`, Geo-Seq-Kollision → transparenter Retry | ✅ |
+| 4.5 | Append unter echter Nebenläufigkeit: PK-Verletzung → `ErrVersionConflict`, Geo-Sequenz kollisionsfrei vergeben (Advisory-Sperre) | ✅ |
 | 4.6 | Dual-Write-Trigger auf PG/YB als plpgsql-Funktion + Zeilen-Trigger | ✅ |
 | 4.7 | Test-Matrix: `ORMPP_TEST_BACKEND`/`ORMPP_TEST_DSN`, Schema-pro-Test-Isolation (search_path), docker-compose.yml, CI-Jobs test-postgres/test-yugabyte | ✅ |
 
@@ -154,6 +154,18 @@ Overhead vs. Roh-SQL (innerhalb desselben Laufs gemessen — die robuste Metrik;
 - **Platzhalter-Strategie:** Engine schreibt überall `?`; `dialq` rebindet pro Dialekt ($n auf PG/YB). String-Literale bleiben unangetastet.
 - **Offen (Phase 4b):** native `PARTITION BY LIST (geo)` der Event-Tabellen (erfordert Partition-Key im PK — Schemaänderung), Archiv-Partitionen/-Nebentabellen, `ormpp_geo_regions`-Lebenszyklus, Leases für Projektions-Worker über Instanzen hinweg (`FOR UPDATE SKIP LOCKED`-Optimierung), Typ-Wörterbuch-Registrierung unter paralleler Migration mehrerer Instanzen.
 - **Poison-Rows/Dead-Letter und `MigrationStatus`/`Health`** weiterhin Phase 5.
+- **Geo-Sequenz: sperren statt wiederholen** (nachgezogen 2026-08-17). Die
+  Vergabe lief als `MAX(seq)+1`; kollidierten zwei parallele Appends, sollte ein
+  Retry es richten. Der trug zweimal nicht: (1) Die Erkennung prüfte den
+  Indexnamen der Elterntabelle, bei Geo-Partitionierung meldet PG/YB aber den
+  der **Partition** (`…_geo_default_geo_seq_idx`) — dasselbe galt für die
+  `_pkey`-Einstufung und damit für `ErrVersionConflict`. (2) Innerhalb einer
+  **Aufrufer-Transaktion** wird grundsätzlich nicht wiederholt, weil ORM++ eine
+  fremde Transaktion nicht neu starten darf — der Fehler schlug durch.
+  Beides zusammen hieß: Auf SQLite lief App-Code, der auf PG/YB scheiterte —
+  ein Bruch der Verhaltensgleichheit. Die Vergabe ist jetzt per
+  `pg_advisory_xact_lock` auf (Tabelle, Geo) serialisiert und damit
+  kollisionsfrei; SQLite serialisiert ohnehin über den Single-Writer.
 
 ## Phase-3-Arbeitsplan (Reihenfolge)
 

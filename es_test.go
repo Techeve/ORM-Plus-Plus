@@ -739,3 +739,105 @@ func TestWorkerLeaseCoordination(t *testing.T) {
 		t.Fatalf("Übernahme nach Freigabe fehlgeschlagen: cp=%d (%v)", cp, err)
 	}
 }
+
+// TestAppendErrorsRecognizedOnPartitions deckt die Fehlererkennung gegen die
+// Meldungstexte aller drei Backends ab.
+//
+// Bei Geo-Partitionierung nennt PG/YB den Index der PARTITION. Wurde nur der
+// Elternname geprüft, blieb eine Sequenzkollision unerkannt und damit
+// unwiederholt — genau im Cluster, wo sie überhaupt erst auftritt.
+func TestAppendErrorsRecognizedOnPartitions(t *testing.T) {
+	t.Parallel()
+	const table = "ticket_events"
+
+	seq := []struct {
+		name string
+		msg  string
+	}{
+		{"Elterntabelle", `duplicate key value violates unique constraint "ux_ticket_events_geo_seq"`},
+		{"Partition (default)", `duplicate key value violates unique constraint "ticket_events_geo_default_geo_seq_idx"`},
+		{"Partition (Region)", `duplicate key value violates unique constraint "ticket_events_geo_eu_geo_seq_idx"`},
+		{"SQLite", `UNIQUE constraint failed: ticket_events.geo, ticket_events.seq`},
+	}
+	for _, c := range seq {
+		if !isSeqCollision(errors.New(c.msg), table) {
+			t.Errorf("isSeqCollision(%s) = false, erwartet true", c.name)
+		}
+	}
+
+	pk := []struct {
+		name string
+		msg  string
+	}{
+		{"Elterntabelle", `duplicate key value violates unique constraint "ticket_events_pkey"`},
+		{"Partition (default)", `duplicate key value violates unique constraint "ticket_events_geo_default_pkey"`},
+		{"Partition (Region)", `duplicate key value violates unique constraint "ticket_events_geo_eu_pkey"`},
+		{"SQLite", `UNIQUE constraint failed: ticket_events.aggregate_id, ticket_events.aggregate_seq`},
+	}
+	for _, c := range pk {
+		if err := classifyAppendErr(errors.New(c.msg), table); !errors.Is(err, ErrVersionConflict) {
+			t.Errorf("classifyAppendErr(%s) = %v, erwartet ErrVersionConflict", c.name, err)
+		}
+	}
+
+	// Eine Sequenzkollision darf NICHT als Versionskonflikt durchgehen: Sie ist
+	// wiederholbar, ein Versionskonflikt gehört dem Aufrufer gemeldet.
+	seqMsg := errors.New(`duplicate key value violates unique constraint "ticket_events_geo_default_geo_seq_idx"`)
+	if err := classifyAppendErr(seqMsg, table); errors.Is(err, ErrVersionConflict) {
+		t.Error("Sequenzkollision als ErrVersionConflict eingestuft")
+	}
+
+	// Fremde Fehler bleiben unberührt.
+	other := errors.New(`connection refused`)
+	if isSeqCollision(other, table) {
+		t.Error("isSeqCollision auf fremdem Fehler")
+	}
+	if err := classifyAppendErr(other, table); errors.Is(err, ErrVersionConflict) {
+		t.Error("fremder Fehler als ErrVersionConflict eingestuft")
+	}
+}
+
+// TestConcurrentAppendsInCallerTx: parallele Appends verschiedener Aggregate
+// innerhalb je eigener Aufrufer-Transaktion.
+//
+// Innerhalb einer fremden Transaktion kann ORM++ nicht wiederholen — es darf
+// sie nicht neu starten. Die Vergabe der Geo-Sequenz muss deshalb schon
+// kollisionsfrei sein, sonst schlägt der Unique-Index bis zum Aufrufer durch.
+// Auf SQLite verdeckt der Single-Writer den Fall vollständig.
+func TestConcurrentAppendsInCallerTx(t *testing.T) {
+	t.Parallel()
+	db, ctx := esTestDB(t)
+
+	const n = 12
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = db.Tx(ctx, func(tx Tx) error {
+				tk := New[Ticket](tx)
+				_, err := tk.Append(ctx, TicketOpened{Title: fmt.Sprintf("T%d", i)})
+				return err
+			})
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("Append %d: %v", i, err)
+		}
+	}
+
+	// Jedes Event muss eine eigene Geo-Sequenz bekommen haben.
+	var rows, distinct int64
+	q := db.q()
+	if err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*), COUNT(DISTINCT seq) FROM ticket_events`).Scan(&rows, &distinct); err != nil {
+		t.Fatalf("Zählen: %v", err)
+	}
+	if rows != n || distinct != n {
+		t.Errorf("Zeilen = %d, verschiedene seq = %d, erwartet je %d", rows, distinct, n)
+	}
+}
