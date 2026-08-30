@@ -51,10 +51,10 @@ func TestAbgleichEndeZuEnde(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/Techeve/LCM/issues", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("page") != "1" {
-			w.Write([]byte("[]"))
+			_, _ = w.Write([]byte("[]"))
 			return
 		}
-		json.NewEncoder(w).Encode([]map[string]any{
+		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"number": 1, "title": "geschlossen auf GitHub", "state": "closed", "html_url": "https://github.com/Techeve/ORM-Plus-Plus/issues/1"},
 			{"number": 2, "title": "unverändert", "state": "open", "html_url": "https://github.com/Techeve/ORM-Plus-Plus/issues/2"},
 			{"number": 3, "title": "neu", "state": "open", "html_url": "https://github.com/Techeve/ORM-Plus-Plus/issues/3"},
@@ -63,24 +63,24 @@ func TestAbgleichEndeZuEnde(t *testing.T) {
 	})
 	mux.HandleFunc("GET /api/v4/projects/techeve%2Flcm/issues", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("page") != "1" {
-			w.Write([]byte("[]"))
+			_, _ = w.Write([]byte("[]"))
 			return
 		}
-		json.NewEncoder(w).Encode([]map[string]any{
+		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"iid": 11, "state": "opened", "description": twinDesc},
 			{"iid": 12, "state": "opened", "description": openTwinDesc},
 		})
 	})
 	mux.HandleFunc("POST /api/v4/projects/techeve%2Flcm/issues", func(w http.ResponseWriter, r *http.Request) {
 		var p map[string]any
-		json.NewDecoder(r.Body).Decode(&p)
+		_ = json.NewDecoder(r.Body).Decode(&p)
 		created = append(created, p["title"].(string))
 		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(`{"iid": 99}`))
+		_, _ = w.Write([]byte(`{"iid": 99}`))
 	})
 	mux.HandleFunc("PUT /api/v4/projects/techeve%2Flcm/issues/", func(w http.ResponseWriter, r *http.Request) {
 		stateEvents = append(stateEvents, r.URL.Path+"?"+r.URL.RawQuery)
-		w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

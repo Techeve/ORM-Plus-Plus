@@ -210,7 +210,7 @@ func getJSON(u, token string, into any) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
 		return fmt.Errorf("%s: HTTP %d: %s", u, resp.StatusCode, body)
@@ -234,7 +234,7 @@ func postJSON(cfg config, u string, payload map[string]any) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
 		return 0, fmt.Errorf("%s: HTTP %d: %s", u, resp.StatusCode, body)
@@ -253,7 +253,7 @@ func doExpectOK(req *http.Request) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
 		return fmt.Errorf("%s: HTTP %d: %s", req.URL, resp.StatusCode, body)
