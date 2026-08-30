@@ -13,7 +13,7 @@ Testsuite, CI-Matrix). Für den Einstieg mit Beispielen siehe die
 physische Schema siehe [Architektur](/reference/architecture/).
 
 ```go
-import orm "gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
+import orm "gitlab.techeve.de/techeve/orm-plus-plus"
 ```
 
 ## 1. Grundprinzip
@@ -833,7 +833,7 @@ package main
 
 import (
     "context"
-    orm "gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
+    orm "gitlab.techeve.de/techeve/orm-plus-plus"
 )
 
 type Todo struct {

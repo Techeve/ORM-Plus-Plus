@@ -1,0 +1,17 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ORM++">
+  <title>ORM++</title>
+  <desc>Einfarbige Variante des ORM++-Zylinders; uebernimmt die Textfarbe des Umfelds.</desc>
+  <g transform="translate(-82.75,-60.875) scale(2.5)" fill="currentColor" stroke="currentColor">
+    <path d="M52 90 L52 182 A60 21 0 0 0 172 182 L172 90 Z" fill-opacity="0.42" stroke="none"/>
+    <path d="M52 121 A60 21 0 0 0 172 121" fill="none" stroke-width="3" stroke-opacity="0.75" stroke-linecap="round"/>
+    <path d="M52 151 A60 21 0 0 0 172 151" fill="none" stroke-width="3" stroke-opacity="0.75" stroke-linecap="round"/>
+    <ellipse cx="112" cy="90" rx="60" ry="21" stroke="none"/>
+    <ellipse cx="112" cy="90" rx="35" ry="10.5" fill="none" stroke-width="2.5" stroke-opacity="0.30"/>
+    <g stroke="none">
+      <rect x="171" y="58.5" width="22" height="7" rx="2.5"/>
+      <rect x="178.5" y="51" width="7" height="22" rx="2.5"/>
+      <rect x="197" y="58.5" width="22" height="7" rx="2.5"/>
+      <rect x="204.5" y="51" width="7" height="22" rx="2.5"/>
+    </g>
+  </g>
+</svg>

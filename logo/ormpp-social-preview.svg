@@ -1,0 +1,47 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ORM++ - Model-first Persistenz fuer Go">
+  <title>ORM++ — Model-first Persistenz für Go</title>
+  <defs>
+    <!-- Deckender Hintergrund: Social Previews erscheinen auf hellen wie
+         dunklen Oberflaechen — transparent waere dort unbrauchbar. -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="640" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#15303F"/>
+      <stop offset="0.55" stop-color="#0F2333"/>
+      <stop offset="1" stop-color="#0A1723"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.26" cy="0.48" r="0.55">
+      <stop offset="0" stop-color="#19B6C7" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#19B6C7" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect width="1280" height="640" fill="url(#glow)"/>
+  <rect x="0" y="636" width="1280" height="4" fill="#19B6C7"/>
+
+  <!-- Zylinder, linke Bildhaelfte -->
+  <g transform="translate(23,128) scale(1.75)">
+    <path d="M52 90 L52 182 A60 21 0 0 0 172 182 L172 90 Z" fill="#0A1723"/>
+    <path d="M52 121 A60 21 0 0 0 172 121" fill="none" stroke="#19B6C7" stroke-width="3" stroke-opacity="0.55" stroke-linecap="round"/>
+    <path d="M52 151 A60 21 0 0 0 172 151" fill="none" stroke="#19B6C7" stroke-width="3" stroke-opacity="0.55" stroke-linecap="round"/>
+    <ellipse cx="112" cy="90" rx="60" ry="21" fill="#3ED0DF"/>
+    <ellipse cx="112" cy="90" rx="35" ry="10.5" fill="none" stroke="#0A1723" stroke-opacity="0.30" stroke-width="2.5"/>
+    <circle cx="112" cy="90" r="3.4" fill="#0A1723" fill-opacity="0.45"/>
+    <g fill="#3ED0DF">
+      <rect x="171" y="58.5" width="22" height="7" rx="2.5"/>
+      <rect x="178.5" y="51" width="7" height="22" rx="2.5"/>
+      <rect x="197" y="58.5" width="22" height="7" rx="2.5"/>
+      <rect x="204.5" y="51" width="7" height="22" rx="2.5"/>
+    </g>
+  </g>
+
+  <!-- Titel und Beschreibung -->
+  <text x="520" y="252" font-family="Avenir Next, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="104" font-weight="700" fill="#FFFFFF" letter-spacing="-2">ORM++</text>
+  <text x="520" y="316" font-family="Avenir Next, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="35" font-weight="600" fill="#3ED0DF">Model-first Persistenz für Go</text>
+
+  <rect x="520" y="352" width="72" height="4" rx="2" fill="#19B6C7" fill-opacity="0.7"/>
+
+  <text x="520" y="410" font-family="Avenir Next, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="27" fill="#C7DAE4">ORM-Mapping · Event Sourcing · Projektionen</text>
+  <text x="520" y="450" font-family="Avenir Next, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="27" fill="#C7DAE4">Snapshots · Expand/Contract-Migrationen</text>
+
+  <text x="520" y="524" font-family="Avenir Next, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="24" font-weight="600" fill="#7FA8BC" letter-spacing="1.5">SQLite · PostgreSQL · YugabyteDB</text>
+</svg>
