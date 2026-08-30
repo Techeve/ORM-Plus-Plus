@@ -6,7 +6,7 @@ korrekt auf diesem Projekt arbeiten zu können. Vor dem ersten Tool-Call hier le
 ## 1. Projekt auf einen Blick
 
 **Name:** ORM++
-**Import-Pfad:** `gitlab.techeve.de/orm-plus-plus/orm-plus-plus`
+**Import-Pfad:** `gitlab.techeve.de/techeve/orm-plus-plus`
 **Go-Version:** 1.26
 **Status:** Phasen 1–5 abgeschlossen ✅ — die komplette v1-API ist implementiert, keine Stubs mehr. 48 Tests laufen backend-identisch auf SQLite, PostgreSQL und YugabyteDB. Vor dem v1.0-Tag: Lizenz, Lasttests, Beispielprojekt (doc/TASK.md „Vor dem Release").
 

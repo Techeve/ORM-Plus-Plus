@@ -3,6 +3,7 @@ stages:
   - build
   - deploy
   - release
+  - maintenance
 
 default:
   tags:
@@ -11,6 +12,12 @@ default:
 variables:
   GOPATH: $CI_PROJECT_DIR/.go
   GOCACHE: $CI_PROJECT_DIR/.go-cache
+
+# Die geplante Issue-Sync-Pipeline fasst den Code nicht an — Tests, Lint,
+# Doku und Benchmarks bleiben dort aussen vor.
+.skip-on-issue-sync: &skip-on-issue-sync
+  if: $GITHUB_ISSUE_SYNC == "true"
+  when: never
 
 .go-cache: &go-cache
   cache:
@@ -38,6 +45,7 @@ test:
       - coverage.txt
     expire_in: 1 week
   rules:
+    - *skip-on-issue-sync
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH
     - if: $CI_COMMIT_TAG
@@ -59,6 +67,7 @@ test-postgres:
   script:
     - go test -race ./...
   rules:
+    - *skip-on-issue-sync
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH
     - if: $CI_COMMIT_TAG
@@ -104,6 +113,7 @@ test-yugabyte:
     # Testcontainer ist hier der begrenzende Faktor, nicht die Bibliothek.
     - go test -race -timeout 22m -parallel 1 ./...
   rules:
+    - *skip-on-issue-sync
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH
     - if: $CI_COMMIT_TAG
@@ -119,6 +129,7 @@ lint:
     - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
     - $GOPATH/bin/golangci-lint run --timeout 5m ./...
   rules:
+    - *skip-on-issue-sync
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH
     - if: $CI_COMMIT_TAG
@@ -138,8 +149,9 @@ docs-build:
   needs: []
   variables:
     DOCS_TITLE: "ORM++"
-    DOCS_REPO: "https://gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
+    DOCS_REPO: "https://gitlab.techeve.de/techeve/orm-plus-plus"
   rules:
+    - *skip-on-issue-sync
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
     - docs-build
@@ -164,6 +176,7 @@ docs-deploy:
   needs:
     - docs-build
   rules:
+    - *skip-on-issue-sync
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
     - docs-deploy
@@ -196,6 +209,7 @@ bench:
       - bench.txt
     expire_in: 6 mos
   rules:
+    - *skip-on-issue-sync
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       when: manual
       allow_failure: true
@@ -245,3 +259,29 @@ release:
     description: release-notes.md
   rules:
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+
+# GitHub ist die Quelle seiner Issues: Der Abgleich legt neue in GitLab an,
+# schliesst dort die auf GitHub geschlossenen und oeffnet wieder geoeffnete.
+# Kommentare bleiben bewusst aussen vor — die Diskussion gehoert auf genau
+# eine Plattform, der Rueckverweis in der Beschreibung fuehrt dorthin.
+#
+# Laeuft als geplante Pipeline mit GITHUB_ISSUE_SYNC=true. Voraussetzung ist
+# die CI-Variable ISSUE_SYNC_TOKEN (Projekt-Access-Token dieses Projekts,
+# Scope api, masked). Das Lesen oeffentlicher GitHub-Issues braucht kein Token.
+github-issue-sync:
+  stage: maintenance
+  image: golang:1.26
+  <<: *go-cache
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $GITHUB_ISSUE_SYNC == "true"
+    - if: $CI_PIPELINE_SOURCE == "web" && $GITHUB_ISSUE_SYNC == "true"
+  variables:
+    GITHUB_REPO: Techeve/ORM-Plus-Plus
+    GITLAB_MIRROR_PROJECT: techeve/orm-plus-plus
+  script:
+    - |
+      if [ -z "${ISSUE_SYNC_TOKEN:-}" ]; then
+        echo "FEHLER: CI-Variable ISSUE_SYNC_TOKEN fehlt (Projekt-Access-Token, Scope api)."
+        exit 1
+      fi
+    - go run ./tools/githubsync

@@ -1,4 +1,4 @@
-module gitlab.techeve.de/orm-plus-plus/orm-plus-plus
+module gitlab.techeve.de/techeve/orm-plus-plus
 
 go 1.26
 

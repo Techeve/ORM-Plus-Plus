@@ -14,14 +14,14 @@ sidebar:
 ## Add the module
 
 ```go
-import orm "gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
+import orm "gitlab.techeve.de/techeve/orm-plus-plus"
 ```
 
 ORM++ lives on the internal GitLab server. For private fetches:
 
 ```sh
 export GOPRIVATE=gitlab.techeve.de
-go get gitlab.techeve.de/orm-plus-plus/orm-plus-plus@latest
+go get gitlab.techeve.de/techeve/orm-plus-plus@latest
 ```
 
 ## Drivers

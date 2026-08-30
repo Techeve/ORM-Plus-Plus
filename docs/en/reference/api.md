@@ -13,7 +13,7 @@ matrix). For a hands-on start with examples, see the
 schema, see [Architecture](/en/reference/architecture/).
 
 ```go
-import orm "gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
+import orm "gitlab.techeve.de/techeve/orm-plus-plus"
 ```
 
 ## 1. Core principle
@@ -833,7 +833,7 @@ package main
 
 import (
     "context"
-    orm "gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
+    orm "gitlab.techeve.de/techeve/orm-plus-plus"
 )
 
 type Todo struct {

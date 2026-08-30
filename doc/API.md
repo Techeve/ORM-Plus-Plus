@@ -5,7 +5,7 @@ Verbindliche Spezifikation der öffentlichen Go-API von ORM++. Dieses Dokument i
 **Status:** Vollständig implementiert (Phasen 1–5) — die gesamte hier spezifizierte API läuft verhaltensgleich auf SQLite, PostgreSQL und YugabyteDB (identische Testsuite, CI-Matrix). Import-Pfad:
 
 ```go
-import orm "gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
+import orm "gitlab.techeve.de/techeve/orm-plus-plus"
 ```
 
 ---
@@ -933,7 +933,7 @@ package main
 
 import (
     "context"
-    orm "gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
+    orm "gitlab.techeve.de/techeve/orm-plus-plus"
 )
 
 type Todo struct {

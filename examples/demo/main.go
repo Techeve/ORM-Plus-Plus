@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	orm "gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
+	orm "gitlab.techeve.de/techeve/orm-plus-plus"
 )
 
 // ============================================================================

@@ -38,7 +38,7 @@ import (
 	"strings"
 	"time"
 
-	orm "gitlab.techeve.de/orm-plus-plus/orm-plus-plus"
+	orm "gitlab.techeve.de/techeve/orm-plus-plus"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // Roh-SQL + Admin-Verbindung (PG/YB)
 	_ "modernc.org/sqlite"             // Roh-SQL (SQLite)
