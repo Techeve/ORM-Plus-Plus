@@ -280,8 +280,10 @@ github-issue-sync:
     GITLAB_MIRROR_PROJECT: techeve/orm-plus-plus
   script:
     - |
-      if [ -z "${ISSUE_SYNC_TOKEN:-}" ]; then
-        echo "FEHLER: CI-Variable ISSUE_SYNC_TOKEN fehlt (Projekt-Access-Token, Scope api)."
-        exit 1
-      fi
+      # Auch den unveraenderten Platzhalter abfangen: sonst laeuft der Abgleich
+      # bis in die API und scheitert dort mit einem nichtssagenden 401.
+      case "${ISSUE_SYNC_TOKEN:-}" in
+        "")          echo "FEHLER: CI-Variable ISSUE_SYNC_TOKEN fehlt (Projekt-Access-Token, Scope api)."; exit 1 ;;
+        CHANGE_ME)   echo "FEHLER: ISSUE_SYNC_TOKEN ist noch der Platzhalter CHANGE_ME (Projekt-Access-Token, Scope api eintragen)."; exit 1 ;;
+      esac
     - go run ./tools/githubsync
