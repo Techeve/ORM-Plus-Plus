@@ -15,7 +15,7 @@ The current, complete history therefore doesn't live as a static copy in
 these docs — it lives at the source, where it's kept up to date
 automatically:
 
-**[View releases on GitLab →](https://gitlab.techeve.de/techeve/orm-plus-plus/-/releases)**
+**[View releases on GitLab →](https://gitlab.techeve.de/techeve/orm-plus-plus/-/releases?mtm_campaign=linking&mtm_kwd=doc)**
 
 ## Versioning scheme
 
