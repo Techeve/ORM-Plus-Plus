@@ -87,6 +87,10 @@ type dialect interface {
 	// Appends dasselbe MAX(seq) und kollidieren auf dem Unique-Index.
 	// SQLite meldet nil: Der Single-Writer serialisiert bereits.
 	lockGeoSeq(ctx ctxType, q queryer, table, geo string) error
+	// serializesAppends sagt, ob lockGeoSeq die Vergabe wirklich
+	// serialisiert. Ohne das koennen Appends in einer fremden Transaktion
+	// kollidieren (Tests ueberspringen den Fall auf solchen Backends).
+	serializesAppends() bool
 }
 
 // regionPlacement bindet eine Region an ihren physischen Standort — auf

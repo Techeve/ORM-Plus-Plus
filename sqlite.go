@@ -118,6 +118,8 @@ func (sqliteDialect) tableIndexes(queryer, string) ([]string, error) { return ni
 // ist bereits serialisiert.
 func (sqliteDialect) lockGeoSeq(ctxType, queryer, string, string) error { return nil }
 
+func (sqliteDialect) serializesAppends() bool { return true }
+
 func (sqliteDialect) dualWriteTriggerSQL(table, pk string) []string {
 	now := `strftime('%Y-%m-%dT%H:%M:%fZ','now')`
 	return []string{

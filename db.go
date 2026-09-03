@@ -45,6 +45,7 @@ type DB struct {
 	activeReplace map[string]*compiledReplace // Alt-Tabelle → Schritt (Dual-Write-Drain)
 	lastBeat      time.Time                   // nur vom Worker-Goroutine benutzt
 	leaseUntil    map[string]time.Time        // Lease-Gültigkeit im Speicher (nur Worker-Goroutine)
+	reconciled    map[*model]bool             // Nachprojektion je Model erledigt (nur Worker-Goroutine)
 
 	// Event Sourcing (Phase 2):
 	esTypes   *typeDict                   // Typ-Wörterbuch, geladen bei Migrate
@@ -132,6 +133,7 @@ func Open(driver Driver, opts ...OpenOption) (*DB, error) {
 		hostname:      host,
 		migrations:    map[int][]MigrationStep{},
 		leaseUntil:    map[string]time.Time{},
+		reconciled:    map[*model]bool{},
 	}
 	d.tenants = newTenantRegistry(d)
 	return d, nil

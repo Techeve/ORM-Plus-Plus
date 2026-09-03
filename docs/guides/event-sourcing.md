@@ -60,15 +60,19 @@ pos, err = zone.Append(ctx, RecordAdded{Record: rec})
 
 `Append` hängt Events **atomar** an und erwartet implizit die geladene
 Aggregat-Version — kam jemand dazwischen: `ErrVersionConflict` (dann
-`Refresh` + erneut). Jedes `Append` löst die Trigger-Kette aus: eingebaute
-Projektion → `OnEvent`-Reaktoren → `Watch`-Streams.
+`Refresh` + erneut). Die Read-Model-Zeile schreibt `Append` **in derselben
+Transaktion** mit: ab dem Commit sieht jede `Query` auf jedem Knoten den
+neuen Stand, ohne auf einen Worker zu warten. Jedes `Append` löst danach
+die Trigger-Kette aus: eingebaute Projektion (zieht nach, nur vorwärts) →
+`OnEvent`-Reaktoren → `Watch`-Streams.
 
 ## Lesen: Zustand, Historie, Zeitreisen
 
 ```go
 zone, err := orm.Load[DNSZone](ctx, db, zoneID)  // aus dem Read-Model (schnell)
 
-// Read-your-writes: auf die eigene Schreibposition warten:
+// Read-your-writes: auf die eigene Schreibposition warten. Für eine Position
+// aus dem eigenen Append kehrt das sofort zurück — die Zeile steht bereits.
 zone, err = orm.Load[DNSZone](ctx, db, zoneID, orm.WaitFor(pos, 2*time.Second))
 
 old, err := zone.AtVersion(ctx, 42)   // Zustand nach Event 42
