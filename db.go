@@ -283,6 +283,16 @@ func (d *DB) StartWorkers(ctx context.Context) error {
 	return nil
 }
 
+// Keys liefert den bei Open gesetzten Schluesselgeber — nil, wenn keine
+// Verschluesselung konfiguriert ist.
+//
+// Damit koennen Artefakte AUSSERHALB der Datenbank denselben Schluessel
+// und dieselbe Rotation benutzen: eine Sicherung, die die Felder beim
+// Schreiben entschluesselt, muss sie wieder verschluesseln koennen, ohne
+// dass die Anwendung einen ZWEITEN Schluesselweg aufmacht. Zwei Wege
+// waeren zwei Stellen zum Vergessen.
+func (d *DB) Keys() KeyProvider { return d.opts.keys }
+
 // Tenants liefert das eingebaute Tenant-Register.
 func (d *DB) Tenants() *TenantRegistry { return d.tenants }
 
