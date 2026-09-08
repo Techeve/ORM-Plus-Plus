@@ -437,11 +437,14 @@ func columnDDL(dial dialect, f *field, inCreate bool) string {
 		b.WriteString(" PRIMARY KEY")
 	}
 	if !f.nullable && !f.pk {
-		if inCreate {
-			b.WriteString(" NOT NULL")
-		} else {
-			// ALTER ADD COLUMN mit NOT NULL braucht einen Default für Bestandszeilen.
-			fmt.Fprintf(&b, " NOT NULL DEFAULT %s", dial.zeroLiteral(colKindOf(f)))
+		b.WriteString(" NOT NULL")
+		// ALTER ADD COLUMN mit NOT NULL braucht einen Default für die
+		// Bestandszeilen. Nur wenn das Feld keinen eigenen deklariert:
+		// zwei DEFAULT-Klauseln in einer Spaltendefinition sind ein
+		// Syntaxfehler (PG/YB: "multiple default values specified"), und
+		// der deklarierte ist ohnehin der bessere Wert.
+		if !inCreate && !f.hasDefault {
+			fmt.Fprintf(&b, " DEFAULT %s", dial.zeroLiteral(colKindOf(f)))
 		}
 	}
 	if f.hasDefault {
