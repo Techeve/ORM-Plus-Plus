@@ -4,11 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"reflect"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Aggregate wird in ES-Modelle eingebettet und bringt Identität, Version
@@ -279,6 +282,7 @@ func (a *Aggregate) Append(ctx context.Context, payloads ...any) (Position, erro
 	now := nowUTC()
 	occurred := now.Format(time.RFC3339Nano)
 	var lastSeq int64
+	var applied bool
 
 	write := func(q queryer) error {
 		// Fastpath: Log-Spitze (Version + Heimat-Geo) UND Geo-Sequenz in
@@ -329,6 +333,7 @@ func (a *Aggregate) Append(ctx context.Context, payloads ...any) (Position, erro
 		}
 		lastSeq = geoSeq + int64(len(sts))
 		// Apply innerhalb der Transaktion: ein Apply-Fehler rollt die Events zurück.
+		applied = true
 		ap := a.self.(applier)
 		for i, st := range sts {
 			e := Event{Type: st.decl.name, Version: st.decl.version, Time: now, Seq: a.version + int64(i) + 1, Payload: st.payload}
@@ -336,20 +341,36 @@ func (a *Aggregate) Append(ctx context.Context, payloads ...any) (Position, erro
 				return fmt.Errorf("orm: %s.Apply: %w", m.name, err)
 			}
 		}
-		return nil
+		// Read-Model in DERSELBEN Transaktion: der Zustand liegt nach Apply
+		// im Speicher, die Zeile kostet einen Upsert. Damit ist das
+		// Read-Model ab dem Commit auf jedem Knoten konsistent zum Log —
+		// ohne auf einen Worker zu warten, der die Lease womöglich auf einem
+		// anderen Knoten hält und Sekunden braucht. Der Worker bleibt das
+		// Netz darunter (Reaktoren, Snapshots, Nachprojektion).
+		return d.upsertReadModel(ctx, q, m, a.id.String(), tenant, geo,
+			reflect.ValueOf(a.self).Elem(), a.version+int64(len(sts)))
 	}
 
 	// Unter echter Nebenläufigkeit (PG/YB) kann die MAX-Prüfung zweier
 	// paralleler Appends gleichzeitig bestehen — dann entscheidet der PK
 	// (aggregate_id, aggregate_seq) ⇒ ErrVersionConflict. Kollisionen auf
-	// der Geo-Sequenz (anderes Aggregat, gleiche seq) werden wiederholt;
-	// beides passiert vor Apply, der In-Memory-Zustand bleibt unberührt.
+	// der Geo-Sequenz (anderes Aggregat, gleiche seq) werden wiederholt —
+	// ebenso ein Serialisierungsabbruch (SQLSTATE 40001), mit dem
+	// YugabyteDB unter Snapshot-Isolation denselben Wettlauf meldet.
+	// Beides passiert vor Apply, der In-Memory-Zustand bleibt unberührt.
+	//
+	// Wiederholt wird nur, solange Apply noch nicht lief: danach traegt der
+	// In-Memory-Zustand die Events bereits, ein zweiter Durchlauf wendete
+	// sie doppelt an. Scheitert es erst dahinter (Read-Model, Commit), ist
+	// der Zustand stale und der Aufrufer laedt per Refresh neu.
 	if a.rt.h.inTx() {
 		err = classifyAppendErr(write(a.rt.h.q()), ev)
 	} else {
 		for attempt := 0; ; attempt++ {
+			applied = false
 			err = d.Tx(ctx, func(tx Tx) error { return write(tx.q()) })
-			if err != nil && isSeqCollision(err, ev) && attempt < 5 {
+			if err != nil && !applied && attempt < 8 && (isSeqCollision(err, ev) || isSerializationFailure(err)) {
+				time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
 				continue
 			}
 			err = classifyAppendErr(err, ev)
@@ -387,7 +408,7 @@ func (a *Aggregate) Append(ctx context.Context, payloads ...any) (Position, erro
 		})
 	}
 	d.wakeWorker()
-	return Position{seqs: map[string]int64{geo: lastSeq}}, nil
+	return Position{seqs: map[string]int64{geo: lastSeq}, projected: true}, nil
 }
 
 // --- Nachladen & Zeitreisen ---
@@ -534,6 +555,15 @@ func classifyAppendErr(err error, eventsTable string) error {
 func isSeqCollision(err error, eventsTable string) bool {
 	msg := err.Error()
 	return violatesIndex(msg, eventsTable, "geo_seq") || strings.Contains(msg, eventsTable+".geo")
+}
+
+// isSerializationFailure erkennt den Abbruch einer Transaktion durch einen
+// Wettlauf (SQLSTATE 40001). YugabyteDB meldet so unter Snapshot-Isolation,
+// was PostgreSQL als Unique-Verletzung meldet — dieselbe Ursache, anderer
+// Text. Wiederholbar, solange ORM++ die Transaktion selbst führt.
+func isSerializationFailure(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "40001"
 }
 
 // fetchEventRows liest eine Ergebnismenge vollständig ein und schließt den Cursor.

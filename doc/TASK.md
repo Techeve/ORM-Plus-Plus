@@ -166,6 +166,30 @@ Overhead vs. Roh-SQL (innerhalb desselben Laufs gemessen — die robuste Metrik;
   ein Bruch der Verhaltensgleichheit. Die Vergabe ist jetzt per
   `pg_advisory_xact_lock` auf (Tabelle, Geo) serialisiert und damit
   kollisionsfrei; SQLite serialisiert ohnehin über den Single-Writer.
+- **Advisory-Sperren gibt es nicht überall** (nachgezogen 2026-09-03).
+  YugabyteDB bis 2024.2 (die LTS-Reihe der DNS-Editor-Cloud) meldet
+  `pg_advisory_xact_lock` als „not yet implemented" — und bricht damit die
+  laufende Transaktion ab, jeder Append wäre gescheitert. Der Dialekt prüft
+  das einmal beim Verbinden; ohne Sperre bleibt es beim Wettlauf mit
+  Erkennung und Wiederholung (Unique-Index **und** SQLSTATE 40001, den YB
+  unter Snapshot-Isolation statt der Unique-Verletzung meldet). Grenze:
+  in einer Aufrufer-Transaktion kann dort eine Kollision durchschlagen —
+  `TestConcurrentAppendsInCallerTx` überspringt solche Backends und sagt es.
+- **Read-Model beim Append, Nachprojektion beim Worker-Start** (2026-09-03).
+  Anlass: In der DNS-Editor-Beta standen vier Aggregate im Event-Log, aber
+  nie im Read-Model — der Worker (Lease auf einem anderen Knoten) hatte
+  seinen Checkpoint darüber hinweggeschoben; die genaue Ursache ließ sich
+  nicht mehr rekonstruieren. Zwei Konsequenzen, unabhängig von der Ursache:
+  `Append` schreibt die Read-Model-Zeile in derselben Transaktion (der
+  Zustand liegt nach Apply im Speicher, es kostet einen Upsert), damit ist
+  das Read-Model ab Commit auf jedem Knoten konsistent und `WaitFor` auf die
+  eigene Position kehrt sofort zurück (vorher bis zu 5 s Warten auf einen
+  fremden Worker — auf der Beta regelmäßig `ErrWaitTimeout`). Der Upsert
+  ist **nur vorwärts** (`aggregate_seq`), damit ein Worker, der zu seiner
+  Lesezeit faltet, keinen neueren Stand überschreibt. Und der Worker holt
+  beim ersten Durchlauf je Model nach, was im Hot-Log steht und im
+  Read-Model fehlt oder zurückliegt (`reconcileProjection`) — ein
+  Sicherheitsnetz, das auch den Bestandsschaden repariert.
 
 ## Phase-3-Arbeitsplan (Reihenfolge)
 

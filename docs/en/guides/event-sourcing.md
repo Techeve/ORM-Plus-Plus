@@ -60,15 +60,19 @@ pos, err = zone.Append(ctx, RecordAdded{Record: rec})
 
 `Append` appends events **atomically** and implicitly expects the loaded
 aggregate version — if someone came in between: `ErrVersionConflict` (then
-`Refresh` + retry). Every `Append` triggers the chain: built-in projection →
-`OnEvent` reactors → `Watch` streams.
+`Refresh` + retry). `Append` also writes the read-model row **in the same
+transaction**: from the commit on, every `Query` on every node sees the new
+state without waiting for a worker. Every `Append` then triggers the chain:
+built-in projection (catches up, forward only) → `OnEvent` reactors →
+`Watch` streams.
 
 ## Reading: state, history, time travel
 
 ```go
 zone, err := orm.Load[DNSZone](ctx, db, zoneID)  // from the read model (fast)
 
-// Read-your-writes: wait for your own write position:
+// Read-your-writes: wait for your own write position. For a position from
+// your own Append this returns immediately — the row is already there.
 zone, err = orm.Load[DNSZone](ctx, db, zoneID, orm.WaitFor(pos, 2*time.Second))
 
 old, err := zone.AtVersion(ctx, 42)   // state after event 42

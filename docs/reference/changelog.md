@@ -15,7 +15,7 @@ Die jeweils aktuelle, vollständige Historie steht deshalb nicht als
 statische Kopie hier in der Doku, sondern an der Quelle, wo sie automatisch
 gepflegt wird:
 
-**[Releases auf GitLab ansehen →](https://gitlab.techeve.de/techeve/orm-plus-plus/-/releases)**
+**[Releases auf GitLab ansehen →](https://gitlab.techeve.de/techeve/orm-plus-plus/-/releases?mtm_campaign=linking&mtm_kwd=doc)**
 
 ## Versionsschema
 

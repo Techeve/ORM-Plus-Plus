@@ -46,6 +46,9 @@ type CloudEvent struct {
 // einer Sequenz je Geo. Es gibt keine Totalordnung über Regionen.
 type Position struct {
 	seqs map[string]int64
+	// projected: die Read-Model-Zeile wurde in derselben Transaktion wie
+	// die Events geschrieben — WaitFor muss nicht auf den Worker warten.
+	projected bool
 }
 
 // StreamOption konfiguriert Stream und Watch.

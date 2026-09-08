@@ -124,6 +124,13 @@ func (d *DB) processOnce(ctx context.Context) {
 		if !d.tryLease(ctx, "worker:es:"+m.table) {
 			continue
 		}
+		if !d.reconciled[m] {
+			// Erst wenn die Nachprojektion durch ist, gilt sie als erledigt —
+			// ein Fehler (Netz, Sperre) wird im nächsten Durchlauf erneut versucht.
+			if d.reconcileProjection(ctx, m) == nil {
+				d.reconciled[m] = true
+			}
+		}
 		_ = d.processProjection(ctx, m)
 		_ = d.maybeSnapshot(ctx, m)
 		_ = d.maybeArchive(ctx, m)
@@ -228,7 +235,16 @@ func (d *DB) projectAggregate(ctx context.Context, q queryer, m *model, aggID st
 	if agg.version == 0 {
 		return nil
 	}
-	rv := inst.Elem()
+	return d.upsertReadModel(ctx, q, m, aggID, tenant, geo, inst.Elem(), agg.version)
+}
+
+// upsertReadModel schreibt den Zustand eines Aggregats als Read-Model-Zeile.
+//
+// Nur VORWÄRTS: eine Zeile mit höherer aggregate_seq bleibt stehen. Der
+// Schreibpfad (Append) und der Worker schreiben dieselbe Zeile; der Worker
+// faltet zu SEINER Lesezeit und darf einen inzwischen neueren Stand nicht
+// mit einem älteren überschreiben.
+func (d *DB) upsertReadModel(ctx context.Context, q queryer, m *model, aggID string, tenant ID, geo string, rv reflect.Value, version int64) error {
 	cols := []string{"id"}
 	vals := []any{aggID}
 	for _, f := range m.fields {
@@ -244,7 +260,7 @@ func (d *DB) projectAggregate(ctx context.Context, q queryer, m *model, aggID st
 		vals = append(vals, tenant.String())
 	}
 	cols = append(cols, "geo", "aggregate_seq")
-	vals = append(vals, geo, agg.version)
+	vals = append(vals, geo, version)
 
 	var updates []string
 	for _, c := range cols[1:] {
@@ -256,9 +272,74 @@ func (d *DB) projectAggregate(ctx context.Context, q queryer, m *model, aggID st
 	if d.partModel(m) {
 		target = `"id", "geo"`
 	}
-	query := insertSQL(m.table, cols) + fmt.Sprintf(` ON CONFLICT (%s) DO UPDATE SET %s`, target, strings.Join(updates, ", "))
-	_, err = q.ExecContext(ctx, query, vals...)
+	query := insertSQL(m.table, cols) + fmt.Sprintf(
+		` ON CONFLICT (%s) DO UPDATE SET %s WHERE %q."aggregate_seq" < excluded."aggregate_seq"`,
+		target, strings.Join(updates, ", "), m.table)
+	_, err := q.ExecContext(ctx, query, vals...)
 	return err
+}
+
+// reconcileProjection projiziert Aggregate nach, deren Read-Model-Zeile
+// fehlt oder hinter dem Hot-Log zurückliegt.
+//
+// Ein Sicherheitsnetz, kein Normalfall: Append schreibt die Zeile selbst
+// (inline), der Worker zieht nach. Bleibt trotzdem etwas liegen — ein
+// übersprungener Checkpoint, ein Rebuild, das abbrach —, holt dieser
+// Durchlauf es nach, statt es dauerhaft zu verlieren. Er läuft einmal je
+// Instanz und Model, sobald sie die Projektions-Lease hält.
+func (d *DB) reconcileProjection(ctx context.Context, m *model) error {
+	ev := esEventsTable(m)
+	sel := `e."aggregate_id", '' AS tenant_id, MAX(e."aggregate_seq")`
+	group := `e."aggregate_id", r."aggregate_seq"`
+	if m.tenanted() {
+		sel = `e."aggregate_id", e."tenant_id", MAX(e."aggregate_seq")`
+		group = `e."aggregate_id", e."tenant_id", r."aggregate_seq"`
+	}
+	query := fmt.Sprintf(`SELECT %s FROM %q e LEFT JOIN %q r ON r."id" = e."aggregate_id"
+		GROUP BY %s HAVING r."aggregate_seq" IS NULL OR r."aggregate_seq" < MAX(e."aggregate_seq")`,
+		sel, ev, m.table, group)
+	type behind struct {
+		id     string
+		tenant ID
+	}
+	var todo []behind
+	rows, err := d.qr().QueryContext(ctx, query)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var b behind
+		var tenant string
+		var top int64
+		if err := rows.Scan(&b.id, &tenant, &top); err != nil {
+			rows.Close()
+			return err
+		}
+		if m.tenanted() {
+			if b.tenant, err = ParseID(tenant); err != nil {
+				rows.Close()
+				return err
+			}
+		}
+		todo = append(todo, b)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, b := range todo {
+		geo, err := d.aggregateGeo(ctx, m, b.id)
+		if err != nil {
+			return err
+		}
+		err = d.Tx(ctx, func(tx Tx) error {
+			return d.projectAggregate(ctx, tx.q(), m, b.id, b.tenant, geo)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // --- Reaktoren (OnEvent) ---
@@ -614,7 +695,10 @@ func (d *DB) maybeArchive(ctx context.Context, m *model) error {
 // waitForProjection blockiert, bis die eingebaute Projektion die Position
 // erreicht hat — sonst ErrWaitTimeout.
 func (d *DB) waitForProjection(ctx context.Context, m *model, pos Position, timeout time.Duration) error {
-	if len(pos.seqs) == 0 {
+	// Append hat die Read-Model-Zeile bereits in seiner Transaktion
+	// geschrieben — es gibt nichts abzuwarten. Der Checkpoint des Workers
+	// zieht nach, aber die Zeile ist ab dem Commit auf jedem Knoten sichtbar.
+	if len(pos.seqs) == 0 || pos.projected {
 		return nil
 	}
 	consumer := "projection:" + m.table

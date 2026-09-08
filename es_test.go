@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -807,6 +808,9 @@ func TestAppendErrorsRecognizedOnPartitions(t *testing.T) {
 func TestConcurrentAppendsInCallerTx(t *testing.T) {
 	t.Parallel()
 	db, ctx := esTestDB(t)
+	if !db.dial.serializesAppends() {
+		t.Skip("Backend ohne Advisory-Sperren: Appends in fremder Transaktion koennen kollidieren (dokumentierte Grenze)")
+	}
 
 	const n = 12
 	var wg sync.WaitGroup
@@ -839,5 +843,107 @@ func TestConcurrentAppendsInCallerTx(t *testing.T) {
 	}
 	if rows != n || distinct != n {
 		t.Errorf("Zeilen = %d, verschiedene seq = %d, erwartet je %d", rows, distinct, n)
+	}
+}
+
+// Read-Model beim Append (Anlass: DNS-Editor-Beta 2026-08-31 — vier
+// adoptierte Zonen standen im Log, aber nie im Read-Model; der Worker auf
+// einem anderen Knoten hatte den Checkpoint darueber hinweggeschoben).
+// Seither schreibt Append die Zeile selbst, in derselben Transaktion.
+func TestAppendProjectsInline(t *testing.T) {
+	t.Parallel()
+	db, ctx := esTestDB(t)
+	// bewusst KEIN StartWorkers: die Zeile muss ohne Worker da sein
+
+	tk := New[Ticket](db)
+	pos, err := tk.Append(ctx, TicketOpened{Title: "Sofort sichtbar"})
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	rows, err := Query[Ticket](db, ctx).Where(Eq("Title", "Sofort sichtbar")).All()
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Version() != 1 {
+		t.Fatalf("Read-Model ohne Worker: %+v", rows)
+	}
+
+	// WaitFor darf nicht auf einen Worker warten, den es nicht gibt.
+	started := time.Now()
+	if _, err := Load[Ticket](ctx, db, tk.ID(), WaitFor(pos, 5*time.Second)); err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatalf("WaitFor hat gewartet (%s) — die Zeile war bereits geschrieben", time.Since(started))
+	}
+
+	// Folge-Event: Zeile zieht mit, ebenfalls ohne Worker.
+	if _, err := tk.Append(ctx, TicketClosed{}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	closed, err := Query[Ticket](db, ctx).Where(Eq("Status", "closed")).Count()
+	if err != nil || closed != 1 {
+		t.Fatalf("closed = %d (%v), erwartet 1", closed, err)
+	}
+}
+
+// Der Worker faltet zu SEINER Lesezeit — ein aelterer Stand darf einen
+// neueren nicht ueberschreiben.
+func TestReadModelUpsertForwardOnly(t *testing.T) {
+	t.Parallel()
+	db, ctx := esTestDB(t)
+
+	tk := New[Ticket](db)
+	if _, err := tk.Append(ctx, TicketOpened{Title: "neu"}, TicketClosed{}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	m := db.reg.models[reflect.TypeFor[Ticket]()]
+	stale := &Ticket{Title: "alt", Status: "open"}
+	if err := db.upsertReadModel(ctx, db.q(), m, tk.ID().String(), SingleTenant, "local",
+		reflect.ValueOf(stale).Elem(), 1); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := Query[Ticket](db, ctx).Where(Eq("Title", "neu")).First()
+	if err != nil {
+		t.Fatalf("Read-Model ueberschrieben: %v", err)
+	}
+	if got.Status != "closed" || got.Version() != 2 {
+		t.Fatalf("Read-Model = %q v%d, erwartet closed v2", got.Status, got.Version())
+	}
+}
+
+// Nachprojektion: was im Log steht und im Read-Model fehlt oder
+// zurueckliegt, holt der Worker beim ersten Durchlauf nach.
+func TestReconcileProjection(t *testing.T) {
+	t.Parallel()
+	db, ctx := esTestDB(t)
+
+	missing := New[Ticket](db)
+	if _, err := missing.Append(ctx, TicketOpened{Title: "verloren"}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	behind := New[Ticket](db)
+	if _, err := behind.Append(ctx, TicketOpened{Title: "zurueck"}, TicketClosed{}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	// Den Schaden nachstellen: eine Zeile weg, eine auf dem alten Stand.
+	q := db.q()
+	if _, err := q.ExecContext(ctx, `DELETE FROM ticket WHERE id = ?`, missing.ID().String()); err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	if _, err := q.ExecContext(ctx, `UPDATE ticket SET status = 'open', aggregate_seq = 1 WHERE id = ?`, behind.ID().String()); err != nil {
+		t.Fatalf("UPDATE: %v", err)
+	}
+
+	m := db.reg.models[reflect.TypeFor[Ticket]()]
+	if err := db.reconcileProjection(ctx, m); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if _, err := Query[Ticket](db, ctx).Where(Eq("Title", "verloren")).First(); err != nil {
+		t.Fatalf("fehlende Zeile nicht nachprojiziert: %v", err)
+	}
+	got, err := Query[Ticket](db, ctx).Where(Eq("Title", "zurueck")).First()
+	if err != nil || got.Status != "closed" || got.Version() != 2 {
+		t.Fatalf("zurueckliegende Zeile nicht nachgezogen: %+v (%v)", got, err)
 	}
 }

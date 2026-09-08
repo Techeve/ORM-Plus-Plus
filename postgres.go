@@ -40,7 +40,7 @@ func (p pgDriver) connect() (*sql.DB, dialect, error) {
 		_ = sdb.Close()
 		return nil, nil, fmt.Errorf("orm: %s erreichen: %w", which, err)
 	}
-	d := pgDialect{}
+	d := pgDialect{advisory: advisoryLocksAvailable(ctx, sdb)}
 	if p.yb {
 		d.n = "yugabyte"
 	} else {
@@ -49,7 +49,28 @@ func (p pgDriver) connect() (*sql.DB, dialect, error) {
 	return sdb, d, nil
 }
 
-type pgDialect struct{ n string }
+// advisoryLocksAvailable prüft einmal beim Verbinden, ob das Backend
+// Advisory-Sperren kennt. YugabyteDB bis 2024.2 meldet "advisory locks are
+// not yet implemented" — und zwar als Fehler, der die laufende Transaktion
+// abbricht. Deshalb eine eigene Probe statt eines Rückfalls im Schreibpfad.
+func advisoryLocksAvailable(ctx context.Context, sdb *sql.DB) bool {
+	tx, err := sdb.BeginTx(ctx, nil)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(0)`)
+	return err == nil
+}
+
+type pgDialect struct {
+	n        string
+	advisory bool
+}
+
+// serializesAppends: ohne Advisory-Sperren wird die Geo-Sequenz nicht
+// gesperrt, sondern eine Kollision erkannt und der Append wiederholt.
+func (d pgDialect) serializesAppends() bool { return d.advisory }
 
 func (d pgDialect) name() string { return d.n }
 
@@ -298,7 +319,15 @@ func (pgDialect) tableIndexes(q queryer, table string) ([]string, error) {
 // und der Fehler schlüge bis zum Aufrufer durch. Advisory statt Zeilensperre,
 // weil es keine Zeile gibt, die man sperren könnte: Der erste Append einer
 // Region findet die Tabelle leer vor.
-func (pgDialect) lockGeoSeq(ctx ctxType, q queryer, table, geo string) error {
+//
+// Ohne Advisory-Sperren (YugabyteDB 2024.2) bleibt es beim Wettlauf mit
+// Erkennung: der Unique-Index (geo, seq) meldet die Kollision, Append
+// wiederholt außerhalb einer fremden Transaktion. Innerhalb einer solchen
+// schlägt die Kollision durch — dort kann ORM++ nicht neu starten.
+func (d pgDialect) lockGeoSeq(ctx ctxType, q queryer, table, geo string) error {
+	if !d.advisory {
+		return nil
+	}
 	_, err := q.ExecContext(ctx, `SELECT pg_advisory_xact_lock(?)`, advisoryKey(table, geo))
 	return err
 }
